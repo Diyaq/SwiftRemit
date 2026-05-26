@@ -8,6 +8,7 @@ import { Sep24Service } from './sep24-service';
 import { WebhookDispatcher } from './webhook-dispatcher';
 import type { RemittanceCreatedWebhookPayload } from './types';
 import { validateAnchorToml } from './anchor-toml-validator';
+import { recordWebhookNonce } from './database';
 
 interface WebhookRequest extends Request {
   rawBody?: string;
@@ -89,7 +90,14 @@ export class WebhookHandler {
         return;
       }
 
-      // Verify nonce
+      // Idempotency check — return 200 immediately for already-processed nonces
+      const isNewNonce = await recordWebhookNonce(nonce, anchorId);
+      if (!isNewNonce) {
+        res.status(200).json({ success: true, duplicate: true });
+        return;
+      }
+
+      // In-memory nonce guard (replay attack within the current process window)
       if (!this.verifier.validateNonce(nonce)) {
         await this.logSuspicious(anchorId, 'Duplicate nonce (replay attack)', req.body);
         res.status(401).json({ error: 'Invalid nonce' });

@@ -191,6 +191,17 @@ export async function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_ce_actor         ON contract_events(actor);
       CREATE INDEX IF NOT EXISTS idx_ce_remittance_id ON contract_events(remittance_id);
       CREATE INDEX IF NOT EXISTS idx_ce_timestamp     ON contract_events(timestamp);
+
+      -- Idempotency store for incoming webhook nonces
+      CREATE TABLE IF NOT EXISTS webhook_processed_nonces (
+        nonce       VARCHAR(255) NOT NULL,
+        anchor_id   VARCHAR(255) NOT NULL,
+        processed_at TIMESTAMP   NOT NULL DEFAULT NOW(),
+        expires_at  TIMESTAMP    NOT NULL,
+        PRIMARY KEY (nonce, anchor_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_wpn_expires_at ON webhook_processed_nonces(expires_at);
     `);
     console.log('Database initialized successfully');
   } finally {
@@ -842,6 +853,41 @@ export async function saveContractEvent(event: ContractEvent): Promise<void> {
       event.timestamp,
       event.raw_data ? JSON.stringify(event.raw_data) : null,
     ]
+  );
+}
+
+// ── Webhook Idempotency ──────────────────────────────────────────────────────
+
+/**
+ * Attempts to record a nonce as processed. Returns true if the nonce is new
+ * (safe to process), false if it was already seen (duplicate delivery).
+ *
+ * @param nonce     - The x-nonce header value from the incoming webhook
+ * @param anchorId  - The anchor that sent the webhook
+ * @param ttlSeconds - How long to retain the nonce record (default: 24 h)
+ */
+export async function recordWebhookNonce(
+  nonce: string,
+  anchorId: string,
+  ttlSeconds: number = 86400
+): Promise<boolean> {
+  const result = await pool.query(
+    `INSERT INTO webhook_processed_nonces (nonce, anchor_id, expires_at)
+     VALUES ($1, $2, NOW() + ($3 || ' seconds')::INTERVAL)
+     ON CONFLICT (nonce, anchor_id) DO NOTHING
+     RETURNING nonce`,
+    [nonce, anchorId, ttlSeconds]
+  );
+  // If a row was inserted, the nonce is new; if nothing was inserted it's a duplicate
+  return result.rowCount !== null && result.rowCount > 0;
+}
+
+/**
+ * Purges expired nonce records. Call this periodically (e.g. from a cron job).
+ */
+export async function purgeExpiredWebhookNonces(): Promise<void> {
+  await pool.query(
+    `DELETE FROM webhook_processed_nonces WHERE expires_at < NOW()`
   );
 }
 
