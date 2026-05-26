@@ -91,6 +91,8 @@ export interface AnchorKycConfig {
   auth_token: string;
   polling_interval_minutes: number;
   enabled: boolean;
+  /** Base delay in ms between requests for this anchor. Defaults to 1000ms if not set. */
+  inter_request_delay_ms?: number;
 }
 
 /** Raw database row from user_kyc_status table */
