@@ -108,6 +108,33 @@ fn remit(f: &F, amount: i128) -> u64 {
     assert_eq!(f.c.get_remittance(&ids.get(1).unwrap()).status, crate::RemittanceStatus::Completed);
 }
 
+// ── #602 process_expired_remittances batch size limit ────────────────────────
+
+#[test] fn test_602_process_expired_remittances_over_limit_rejected() {
+    let f = setup();
+    // Build a Vec of 51 dummy IDs — all non-existent, so none would be processed
+    // even if the size check were not present. The enforcement must fire first.
+    let mut ids: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&f.env);
+    for i in 0..51u64 {
+        ids.push_back(i);
+    }
+    assert_eq!(
+        f.c.try_process_expired_remittances(&ids),
+        Err(Ok(ContractError::InvalidBatchSize)),
+    );
+}
+
+#[test] fn test_602_process_expired_remittances_at_limit_allowed() {
+    let f = setup();
+    // Exactly 50 IDs is within the limit; all are non-existent so returns empty Vec.
+    let mut ids: soroban_sdk::Vec<u64> = soroban_sdk::Vec::new(&f.env);
+    for i in 0..50u64 {
+        ids.push_back(i);
+    }
+    let processed = f.c.process_expired_remittances(&ids);
+    assert_eq!(processed.len(), 0);
+}
+
 // ── #591 Agent reputation ─────────────────────────────────────────────────────
 
 #[test] fn test_591_new_agent_max_reputation() {
@@ -134,6 +161,19 @@ fn remit(f: &F, amount: i128) -> u64 {
     // New agent has reputation 100, should pass
     let r = f.c.try_create_remittance(&f.sender, &f.agent, &1_000, &None, &None, &None, &None, &None);
     assert!(r.is_ok());
+}
+
+// ── #601 AlreadyPaused circuit-breaker error ─────────────────────────────────
+
+#[test] fn test_601_emergency_pause_already_paused_returns_already_paused() {
+    let f = setup();
+    // First pause succeeds
+    f.c.emergency_pause(&f.admin, &crate::PauseReason::MaintenanceWindow);
+    // Second pause on an already-paused contract must return AlreadyPaused
+    assert_eq!(
+        f.c.try_emergency_pause(&f.admin, &crate::PauseReason::SecurityIncident),
+        Err(Ok(ContractError::AlreadyPaused)),
+    );
 }
 
 // ── #592 Dispute resolution ───────────────────────────────────────────────────

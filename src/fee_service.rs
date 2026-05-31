@@ -371,8 +371,7 @@ fn calculate_fee_by_strategy(amount: i128, strategy: &FeeStrategy) -> Result<i12
             Ok(fee.max(MIN_FEE))
         }
         FeeStrategy::Flat(fee_amount) => {
-            // Fixed fee regardless of amount
-            Ok(*fee_amount)
+            Ok((*fee_amount).max(MIN_FEE))
         }
         FeeStrategy::Dynamic(base_fee_bps) => {
             // Dynamic tiered fee: decreases for larger amounts
@@ -496,6 +495,14 @@ mod tests {
 
         let fee = calculate_fee_by_strategy(amount, &strategy).unwrap();
         assert_eq!(fee, 100);
+    }
+
+    #[test]
+    fn test_calculate_fee_flat_zero_applies_min_fee_floor() {
+        // A Flat(0) fee must still return at least MIN_FEE (1 stroop)
+        let strategy = FeeStrategy::Flat(0);
+        let fee = calculate_fee_by_strategy(1_000, &strategy).unwrap();
+        assert_eq!(fee, MIN_FEE);
     }
 
     #[test]

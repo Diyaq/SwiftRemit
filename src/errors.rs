@@ -255,6 +255,7 @@ pub enum ContractError {
     InvalidOracleAddress = 53,
 
     /// Contract is already paused.
+    /// Cause: Calling emergency_pause when the contract is already in paused state.
     AlreadyPaused = 54,
 
     /// Contract is not currently paused.
