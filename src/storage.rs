@@ -1910,6 +1910,32 @@ pub fn extend_critical_ttls(env: &Env, extend_by_ledgers: u32) {
                 .extend_ttl(&key, ledgers, ledgers);
         }
     }
+
+    // Bump per-agent persistent keys so agents never lose their registration status.
+    let agents = get_agent_list(env);
+    for i in 0..agents.len() {
+        let agent = agents.get_unchecked(i);
+
+        let key = DataKey::AgentRegistered(agent.clone());
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, ledgers, ledgers);
+        }
+
+        let key = DataKey::AgentKycHash(agent.clone());
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, ledgers, ledgers);
+        }
+
+        let key = DataKey::AgentStats(agent.clone());
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, ledgers, ledgers);
+        }
+
+        let key = DataKey::AgentDailyCap(agent.clone());
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, ledgers, ledgers);
+        }
+    }
 }
 
 // === 2-Step Admin Transfer (#365) ===

@@ -444,11 +444,18 @@ pub struct UpgradeSimulationResult {
 /// * `new_wasm_hash` - Hash of the candidate WASM binary
 ///
 /// # Returns
-/// * `UpgradeSimulationResult` with migration preview
+/// * `Ok(UpgradeSimulationResult)` with migration preview
+/// * `Err(ContractError::InvalidInput)` if the hash is the null (all-zero) hash,
+///   which cannot correspond to any uploaded WASM blob
 pub fn simulate_upgrade(
     env: &Env,
     new_wasm_hash: BytesN<32>,
-) -> UpgradeSimulationResult {
+) -> Result<UpgradeSimulationResult, ContractError> {
+    // Reject the null/all-zero hash — it cannot correspond to any uploaded WASM.
+    if new_wasm_hash.iter().all(|b| b == 0) {
+        return Err(ContractError::InvalidInput);
+    }
+
     // Read current schema version (stored by previous migrations, default 0)
     let current_schema_version: u32 = env
         .storage()
@@ -484,14 +491,14 @@ pub fn simulate_upgrade(
         affected_keys.push_back(&soroban_sdk::String::from_str(env, "UpgradeKey::PendingCount"));
     }
 
-    UpgradeSimulationResult {
+    Ok(UpgradeSimulationResult {
         current_schema_version,
         new_schema_version,
         schema_version_delta,
         estimated_migration_steps,
         affected_storage_keys: affected_keys,
         requires_migration,
-    }
+    })
 }
 
 // ============================================================================
