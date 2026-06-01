@@ -384,7 +384,7 @@ fn test_expire_proposal_before_ttl_rejected() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Task 5.10 — Single-admin mode: immediate execution
+// Task 5.10 — Single-admin mode: immediate execution and timelock enforcement
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -401,6 +401,36 @@ fn test_single_admin_immediate_execution() {
     // Execute immediately (no timelock)
     client.execute(&admin, &pid);
 
+    let proposal = client.get_proposal(&pid);
+    assert_eq!(proposal.state, ProposalState::Executed);
+}
+
+/// Regression test for #620: timelock is enforced even with quorum=1 (single-admin).
+/// A single vote reaching quorum does NOT bypass the timelock; the proposal must wait.
+#[test]
+fn test_single_admin_cannot_execute_before_timelock() {
+    let (env, client) = setup_env();
+    let admin = Address::generate(&env);
+    initialize(&env, &client, &admin);
+    // quorum=1, timelock=3600 → one vote is enough to approve but cannot execute early
+    client.migrate_to_governance(&admin, &1u32, &3600u64, &604_800u64);
+
+    let pid = client.propose(&admin, &ProposalAction::UpdateFee(300u32));
+    // Single vote immediately approves (quorum=1)
+    client.vote(&admin, &pid);
+
+    // Attempt to execute before timelock elapses — must fail
+    let result = client.try_execute(&admin, &pid);
+    assert_eq!(result, Err(Ok(ContractError::TimelockNotElapsed)));
+
+    // Advance to just before the boundary — still rejected
+    advance_time(&env, 3599);
+    let result2 = client.try_execute(&admin, &pid);
+    assert_eq!(result2, Err(Ok(ContractError::TimelockNotElapsed)));
+
+    // Advance past the timelock — now execution succeeds
+    advance_time(&env, 1);
+    client.execute(&admin, &pid);
     let proposal = client.get_proposal(&pid);
     assert_eq!(proposal.state, ProposalState::Executed);
 }
