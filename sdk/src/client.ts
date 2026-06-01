@@ -20,7 +20,7 @@ import type {
   GovernanceConfig,
   DailyLimitStatus,
 } from "./types.js";
-import { parseContractError } from "./errors.js";
+import { parseContractError, SwiftRemitError, ErrorCode } from "./errors.js";
 import {
   parseRemittance,
   parseAgentStats,
@@ -463,10 +463,13 @@ export class SwiftRemitClient {
     entries: BatchCreateEntry[]
   ): Promise<Transaction> {
     if (entries.length === 0) {
-      throw new Error("Batch must contain at least one entry");
+      throw new SwiftRemitError(ErrorCode.InvalidBatchSize, "Batch must contain at least one entry");
     }
     if (entries.length > MAX_BATCH_SIZE) {
-      throw new Error(`Batch size ${entries.length} exceeds MAX_BATCH_SIZE (${MAX_BATCH_SIZE})`);
+      throw new SwiftRemitError(
+        ErrorCode.InvalidBatchSize,
+        `Batch size ${entries.length} exceeds MAX_BATCH_SIZE (${MAX_BATCH_SIZE})`
+      );
     }
     const entriesScVal = xdr.ScVal.scvVec(
       entries.map((e) =>
