@@ -42,14 +42,15 @@ function pushSearchParams(params: URLSearchParams): void {
   window.history.pushState(null, '', url);
 }
 
-function getPageFromSearchParams(params: URLSearchParams): number {
+function getPageFromSearchParams(params: URLSearchParams, maxPage = Number.MAX_SAFE_INTEGER): number {
   const rawPage = params.get('page');
   if (!rawPage) {
     return 1;
   }
 
   const parsedPage = Number.parseInt(rawPage, 10);
-  return Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+  if (!Number.isFinite(parsedPage) || parsedPage < 1) return 1;
+  return Math.min(parsedPage, maxPage);
 }
 
 // ── Debounce hook ────────────────────────────────────────────────────────────
@@ -241,10 +242,11 @@ export const TransactionHistory: React.FC<TransactionHistoryProps> = ({
   }, [filtered, pageSize, currentPage]);
 
   const handlePageChange = (newPage: number) => {
+    const clamped = Math.min(Math.max(1, newPage), paginationData.totalPages);
     if (isControlled && onPageChange) {
-      onPageChange(newPage);
+      onPageChange(clamped);
     } else {
-      setUncontrolledPage(newPage);
+      setUncontrolledPage(clamped);
     }
   };
 
