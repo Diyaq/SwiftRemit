@@ -12,6 +12,7 @@ const DEFAULT_STORAGE_TTL_MS = 24 * 60 * 60 * 1000;
 interface StoredWalletSession {
   publicKey: string;
   storedAt: number;
+  expiresAt: number;
 }
 
 interface WalletConnectionResult {
@@ -38,13 +39,16 @@ function parseStoredWalletSession(raw: string | null, storageTtlMs: number): Sto
       return null;
     }
 
-    if (Date.now() - parsed.storedAt > storageTtlMs) {
+    // Use absolute expiresAt if present; fall back to computing it for legacy sessions
+    const expiresAt = typeof parsed.expiresAt === 'number' ? parsed.expiresAt : parsed.storedAt + storageTtlMs;
+    if (Date.now() > expiresAt) {
       return null;
     }
 
     return {
       publicKey: parsed.publicKey,
       storedAt: parsed.storedAt,
+      expiresAt,
     };
   } catch {
     return null;
@@ -145,6 +149,7 @@ export const WalletConnection: React.FC<WalletConnectionProps> = ({
         JSON.stringify({
           publicKey: result.publicKey,
           storedAt: Date.now(),
+          expiresAt: Date.now() + storageTtlMs,
         } satisfies StoredWalletSession)
       );
 
