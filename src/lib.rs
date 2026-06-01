@@ -2084,13 +2084,16 @@ impl SwiftRemitContract {
     }
 
     /// Set daily send limit for a currency/country pair (admin only).
+    ///
+    /// `limit` must be greater than zero. Zero is rejected to prevent
+    /// silently blocking all corridor transfers via an ambiguous no-op limit.
     pub fn set_daily_limit(
         env: Env,
         currency: String,
         country: String,
         limit: i128,
     ) -> Result<(), ContractError> {
-        if limit < 0 {
+        if limit <= 0 {
             return Err(ContractError::InvalidAmount);
         }
 
