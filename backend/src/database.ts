@@ -11,7 +11,7 @@ import {
   WebhookDelivery,
 } from './types';
 
-let pool: Pool | undefined;
+export let pool: Pool | undefined;
 
 export async function initDatabase() {
   let client: PoolClient | undefined;
@@ -509,7 +509,7 @@ export interface AnchorPollFailureRecord {
 }
 
 export async function saveAnchorPollFailure(failure: AnchorPollFailureRecord): Promise<void> {
-  await pool.query(
+  await getPool().query(
     `INSERT INTO anchor_poll_failures (anchor_id, error_message, failed_at)
      VALUES ($1, $2, $3)`,
     [failure.anchor_id, failure.error_message, failure.failed_at ?? new Date()]
