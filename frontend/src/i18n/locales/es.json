@@ -66,7 +66,7 @@
       "incomplete": "Los detalles de la transacción están incompletos.",
       "failed": "La transacción falló. Por favor inténtalo de nuevo.",
       "rejected": "La transacción fue rechazada por la billetera.",
-      "freighterNotInstalled": "Freighter Wallet no está instalado. Por favor instálalo para continuar."
+      "assetIssuerNotConfigured": "El activo {{asset}} no está disponible en este entorno."
     },
     "limits": {
       "min": "Mín: {{value}} {{asset}}",
@@ -83,5 +83,65 @@
     "es": "Español",
     "fr": "Français",
     "pt": "Português"
+  },
+  "kyc": {
+    "loading": "Cargando KYC...",
+    "statusDetails": "Detalles del estado KYC",
+    "overallStatus": "Estado general:",
+    "transferAllowed": "Transferencia permitida:",
+    "transferAllowedYes": "Sí",
+    "transferAllowedNo": "No",
+    "lastChecked": "Última verificación:",
+    "reason": "Motivo:",
+    "anchorBreakdown": "Desglose por Anchor",
+    "noAnchors": "No se encontraron registros KYC de anchor.",
+    "anchor": "Anchor:",
+    "status": "Estado:",
+    "kycLevel": "Nivel KYC:",
+    "verifiedAt": "Verificado el:",
+    "expiresAt": "Expira el:",
+    "noExpiry": "Sin expiración",
+    "checking": "Verificando...",
+    "close": "Cerrar",
+    "badgeExpired": "KYC EXPIRADO — Renovar ahora",
+    "errors": {
+      "loadFailed": "Error al cargar el estado KYC",
+      "unknown": "Error KYC desconocido"
+    }
+  },
+  "dispute": {
+    "title": "Resolución de disputas",
+    "openDisputes": "Disputas abiertas",
+    "auditTrail": "Registro de auditoría",
+    "loading": "Cargando…",
+    "noDisputes": "No hay remesas disputadas.",
+    "noResolved": "No hay disputas resueltas todavía.",
+    "resolving": "Resolviendo…",
+    "resolved": "Disputa resuelta en la blockchain.",
+    "tx": "Tx:",
+    "confirmTitle": "Confirmar resolución",
+    "confirmMessage": "¿Resolver disputa #{{id}} a favor de {{party}}?",
+    "senderFunds": "Los fondos se devolverán al remitente.",
+    "agentFunds": "Los fondos se liberarán al agente menos las tarifas.",
+    "cancel": "Cancelar",
+    "confirm": "Confirmar",
+    "favourSender": "Favorecer remitente",
+    "favourAgent": "Favorecer agente",
+    "sender": "Remitente",
+    "agent": "Agente",
+    "remittance": "Remesa #{{id}}",
+    "amount": "Monto:",
+    "created": "Creado:",
+    "evidenceHash": "Hash de evidencia:",
+    "resolvedAt": "Resuelto el",
+    "inFavourOf": "A favor de",
+    "resolvedBy": "Resuelto por",
+    "prevPage": "← Anterior",
+    "nextPage": "Siguiente →",
+    "page": "Página {{page}}",
+    "errors": {
+      "loadFailed": "Error al cargar disputas",
+      "resolveFailed": "Error al resolver disputa"
+    }
   }
 }
