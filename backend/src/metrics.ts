@@ -121,6 +121,17 @@ export class MetricsService {
   }
 
   /**
+   * Sanitize a Prometheus label value by escaping backslashes, double quotes,
+   * and newlines to prevent label injection or broken text format output.
+   */
+  private sanitizeLabelValue(value: string): string {
+    return value
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\n/g, '\\n');
+  }
+
+  /**
    * Generate Prometheus text format output
    */
   generatePrometheusText(): string {
@@ -130,14 +141,14 @@ export class MetricsService {
     lines.push('# HELP swiftremit_settlements_total Total number of settlements by status');
     lines.push('# TYPE swiftremit_settlements_total counter');
     Object.entries(this.metrics.swiftremit_settlements_total).forEach(([status, count]) => {
-      lines.push(`swiftremit_settlements_total{status="${status}"} ${count}`);
+      lines.push(`swiftremit_settlements_total{status="${this.sanitizeLabelValue(status)}"} ${count}`);
     });
 
     // Webhook deliveries counter
     lines.push('# HELP swiftremit_webhook_deliveries_total Total number of webhook deliveries by result');
     lines.push('# TYPE swiftremit_webhook_deliveries_total counter');
     Object.entries(this.metrics.swiftremit_webhook_deliveries_total).forEach(([result, count]) => {
-      lines.push(`swiftremit_webhook_deliveries_total{result="${result}"} ${count}`);
+      lines.push(`swiftremit_webhook_deliveries_total{result="${this.sanitizeLabelValue(result)}"} ${count}`);
     });
 
     // Active remittances gauge
