@@ -97,7 +97,7 @@ export class SwiftRemitClient {
     method: string,
     args: xdr.ScVal[]
   ): Promise<Transaction> {
-    const account = await this.server.getAccount(sourceAddress);
+    const account = await this.withTimeout(this.server.getAccount(sourceAddress));
     const tx = new TransactionBuilder(account, {
       fee: this.fee,
       networkPassphrase: this.networkPassphrase,
@@ -106,7 +106,7 @@ export class SwiftRemitClient {
       .setTimeout(30)
       .build();
 
-    const simResult = await this.server.simulateTransaction(tx);
+    const simResult = await this.withTimeout(this.server.simulateTransaction(tx));
     if (SorobanRpc.Api.isSimulationError(simResult)) {
       const typed = parseContractError(simResult.error);
       if (typed) throw typed;
@@ -163,7 +163,7 @@ export class SwiftRemitClient {
     method: string,
     args: xdr.ScVal[]
   ): Promise<xdr.ScVal> {
-    const account = await this.server.getAccount(sourceAddress);
+    const account = await this.withTimeout(this.server.getAccount(sourceAddress));
     const tx = new TransactionBuilder(account, {
       fee: this.fee,
       networkPassphrase: this.networkPassphrase,
