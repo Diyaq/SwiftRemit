@@ -4,6 +4,14 @@
 //! and prevent duplicate definitions. All magic numbers should be defined
 //! here with clear documentation.
 
+/// Number of ledgers to extend a remittance's persistent storage TTL when it
+/// transitions from Pending to Processing (#624).
+///
+/// At a 5-second ledger time this equals approximately 7 days, giving agents
+/// a reasonable window to complete the off-chain fiat payout before the
+/// escrow record would otherwise expire.
+pub const PROCESSING_WINDOW_LEDGERS: u32 = 120_960; // ~7 days at 5s/ledger
+
 // ============================================================================
 // Batch Processing Limits
 // ============================================================================
@@ -26,6 +34,31 @@ pub const MAX_EXPIRED_BATCH_SIZE: u32 = 50;
 /// This limit prevents excessive resource consumption during contract migration
 /// operations. Used by migration export/import functions to validate batch size.
 pub const MAX_MIGRATION_BATCH_SIZE: u32 = 100;
+
+/// Maximum number of remittances that can be netted in a single compute_net_settlements call.
+///
+/// This limit prevents DoS attacks via large remittance batches that could cause
+/// excessive gas consumption or ledger timeouts.
+pub const MAX_NETTING_BATCH_SIZE: u32 = 50;
+
+/// Maximum size of timestamp vector in rate limiting sliding window.
+///
+/// Caps the Vec size to prevent unbounded growth and O(n²) pruning behavior
+/// during high-activity periods. Timestamps older than the window are pruned
+/// in a single pass using retain-style filtering.
+///
+/// **Constraint**: must always be strictly greater than the largest per-window
+/// request limit (`MAX_QUERIES_PER_WINDOW`). If this invariant is violated the
+/// sliding-window cap would prune entries that are still inside the rate-limit
+/// window, silently lowering the effective limit below its configured value.
+/// The compile-time assertion below enforces this.
+pub const MAX_VEC_SIZE: usize = 1000;
+
+// Ensure the cap never silently reduces the effective rate limit.
+const _: () = assert!(
+    MAX_VEC_SIZE > MAX_QUERIES_PER_WINDOW as usize,
+    "MAX_VEC_SIZE must be strictly greater than MAX_QUERIES_PER_WINDOW to avoid silent data loss in the sliding-window rate limiter",
+);
 
 // ============================================================================
 // Fee Calculation Constants
@@ -69,6 +102,23 @@ pub const DEFAULT_RATE_LIMIT_MAX_REQUESTS: u32 = 100;
 /// Can be updated by admin via update_rate_limit().
 /// - Value: 60 seconds (1 minute)
 pub const DEFAULT_RATE_LIMIT_WINDOW_SECONDS: u64 = 60;
+
+// ── Abuse-protection sliding-window constants ────────────────────────────────
+
+/// Sliding-window duration used by abuse_protection rate limiting (seconds).
+pub const RATE_LIMIT_WINDOW_SECONDS: u64 = 60;
+
+/// Maximum number of transfer actions allowed per sliding window.
+pub const MAX_TRANSFERS_PER_WINDOW: u32 = 10;
+
+/// Maximum number of cancellation actions allowed per sliding window.
+pub const MAX_CANCELLATIONS_PER_WINDOW: u32 = 5;
+
+/// Maximum number of query actions allowed per sliding window.
+pub const MAX_QUERIES_PER_WINDOW: u32 = 100;
+
+/// Minimum seconds that must elapse between consecutive transfer/settlement actions.
+pub const TRANSFER_COOLDOWN_SECONDS: u64 = 5;
 
 // ============================================================================
 // Daily Send Limits

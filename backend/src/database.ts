@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Pool, PoolClient } from 'pg';
 import {
   AssetVerification,
   VerificationStatus,
@@ -11,16 +11,12 @@ import {
   WebhookDelivery,
 } from './types';
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 2000,
-});
+export let pool: Pool | undefined;
 
 export async function initDatabase() {
-  const client = await pool.connect();
+  let client: PoolClient | undefined;
   try {
+    client = await getPool().connect();
     await client.query(`      CREATE TABLE IF NOT EXISTS transactions (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         transaction_id VARCHAR(255) UNIQUE NOT NULL,
@@ -42,22 +38,6 @@ export async function initDatabase() {
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
 
-      CREATE TABLE IF NOT EXISTS user_kyc_status (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id VARCHAR(255) NOT NULL,
-        anchor_id VARCHAR(255) NOT NULL,
-        kyc_status VARCHAR(20) NOT NULL CHECK (kyc_status IN ('pending', 'approved', 'rejected')),
-        kyc_level VARCHAR(20) CHECK (kyc_level IN ('basic', 'intermediate', 'advanced')),
-        rejection_reason TEXT,
-        verified_at TIMESTAMP NOT NULL,
-        expires_at TIMESTAMP,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        CONSTRAINT uq_user_anchor UNIQUE (user_id, anchor_id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_kyc_status_user_id ON user_kyc_status(user_id);
-      CREATE INDEX IF NOT EXISTS idx_kyc_status_status ON user_kyc_status(kyc_status);
       CREATE TABLE IF NOT EXISTS verified_assets (
         id SERIAL PRIMARY KEY,
         asset_code VARCHAR(12) NOT NULL,
@@ -166,10 +146,39 @@ export async function initDatabase() {
       CREATE INDEX IF NOT EXISTS idx_sep24_user_id ON sep24_transactions(user_id);
       CREATE INDEX IF NOT EXISTS idx_sep24_status ON sep24_transactions(status);
       CREATE INDEX IF NOT EXISTS idx_sep24_last_polled ON sep24_transactions(last_polled);
+
+      CREATE TABLE IF NOT EXISTS contract_events (
+        id              SERIAL PRIMARY KEY,
+        event_type      VARCHAR(50)  NOT NULL,
+        remittance_id   BIGINT,
+        actor           VARCHAR(56),
+        amount          NUMERIC(30, 7),
+        fee             NUMERIC(30, 7),
+        tx_hash         VARCHAR(64),
+        ledger_sequence BIGINT,
+        timestamp       TIMESTAMP    NOT NULL DEFAULT NOW(),
+        raw_data        JSONB
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ce_event_type    ON contract_events(event_type);
+      CREATE INDEX IF NOT EXISTS idx_ce_actor         ON contract_events(actor);
+      CREATE INDEX IF NOT EXISTS idx_ce_remittance_id ON contract_events(remittance_id);
+      CREATE INDEX IF NOT EXISTS idx_ce_timestamp     ON contract_events(timestamp);
+
+      -- Idempotency store for incoming webhook nonces
+      CREATE TABLE IF NOT EXISTS webhook_processed_nonces (
+        nonce       VARCHAR(255) NOT NULL,
+        anchor_id   VARCHAR(255) NOT NULL,
+        processed_at TIMESTAMP   NOT NULL DEFAULT NOW(),
+        expires_at  TIMESTAMP    NOT NULL,
+        PRIMARY KEY (nonce, anchor_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_wpn_expires_at ON webhook_processed_nonces(expires_at);
     `);
     console.log('Database initialized successfully');
   } finally {
-    client.release();
+    client?.release();
   }
 }
 
@@ -192,7 +201,7 @@ export async function saveAssetVerification(verification: AssetVerification): Pr
       updated_at = NOW()
   `;
 
-  await pool.query(query, [
+  await getPool().query(query, [
     verification.asset_code,
     verification.issuer,
     verification.status,
@@ -214,7 +223,7 @@ export async function getAssetVerification(
     SELECT * FROM verified_assets 
     WHERE asset_code = $1 AND issuer = $2
   `;
-  const result = await pool.query(query, [assetCode, issuer]);
+  const result = await getPool().query(query, [assetCode, issuer]);
   
   if (result.rows.length === 0) {
     return null;
@@ -242,7 +251,7 @@ export async function getStaleAssets(hoursOld: number): Promise<AssetVerificatio
     ORDER BY last_verified ASC
     LIMIT 100
   `;
-  const result = await pool.query(query);
+  const result = await getPool().query(query);
   
   return result.rows.map(row => ({
     asset_code: row.asset_code,
@@ -268,7 +277,7 @@ export async function reportSuspiciousAsset(
         updated_at = NOW()
     WHERE asset_code = $1 AND issuer = $2
   `;
-  await pool.query(query, [assetCode, issuer]);
+  await getPool().query(query, [assetCode, issuer]);
 }
 
 export async function saveAssetReport(
@@ -281,7 +290,7 @@ export async function saveAssetReport(
     INSERT INTO asset_reports (asset_code, issuer, reason, reporter_id)
     VALUES ($1, $2, $3, $4)
   `;
-  await pool.query(query, [assetCode, issuer, reason, reporterId || null]);
+  await getPool().query(query, [assetCode, issuer, reason, reporterId || null]);
 }
 
 export async function getVerifiedAssets(limit: number = 100): Promise<AssetVerification[]> {
@@ -291,7 +300,7 @@ export async function getVerifiedAssets(limit: number = 100): Promise<AssetVerif
     ORDER BY reputation_score DESC, trustline_count DESC
     LIMIT $1
   `;
-  const result = await pool.query(query, [limit]);
+  const result = await getPool().query(query, [limit]);
   
   return result.rows.map(row => ({
     asset_code: row.asset_code,
@@ -315,7 +324,7 @@ export async function saveFxRate(fxRate: FxRate): Promise<void> {
     ON CONFLICT (transaction_id) DO NOTHING
   `;
 
-  await pool.query(query, [
+  await getPool().query(query, [
     fxRate.transaction_id,
     fxRate.rate,
     fxRate.provider,
@@ -330,7 +339,7 @@ export async function getFxRate(transactionId: string): Promise<FxRateRecord | n
     SELECT * FROM fx_rates 
     WHERE transaction_id = $1
   `;
-  const result = await pool.query(query, [transactionId]);
+  const result = await getPool().query(query, [transactionId]);
   
   if (result.rows.length === 0) {
     return null;
@@ -364,7 +373,7 @@ export async function saveAnchorKycConfig(config: AnchorKycConfig): Promise<void
       updated_at = NOW()
   `;
 
-  await pool.query(query, [
+  await getPool().query(query, [
     config.anchor_id,
     config.kyc_server_url,
     config.auth_token,
@@ -375,7 +384,7 @@ export async function saveAnchorKycConfig(config: AnchorKycConfig): Promise<void
 
 export async function getAnchorKycConfigs(): Promise<AnchorKycConfig[]> {
   const query = `SELECT * FROM anchor_kyc_configs WHERE enabled = TRUE`;
-  const result = await pool.query(query);
+  const result = await getPool().query(query);
   
   return result.rows.map(row => ({
     anchor_id: row.anchor_id,
@@ -401,7 +410,7 @@ export async function saveUserKycStatus(kycStatus: DbUserKycStatus): Promise<voi
       updated_at = NOW()
   `;
 
-  await pool.query(query, [
+  await getPool().query(query, [
     kycStatus.user_id,
     kycStatus.anchor_id,
     kycStatus.status,
@@ -417,7 +426,7 @@ export async function getUserKycStatus(userId: string, anchorId: string): Promis
     SELECT * FROM user_kyc_status 
     WHERE user_id = $1 AND anchor_id = $2
   `;
-  const result = await pool.query(query, [userId, anchorId]);
+  const result = await getPool().query(query, [userId, anchorId]);
   
   if (result.rows.length === 0) {
     return null;
@@ -444,7 +453,7 @@ export async function getUsersNeedingKycCheck(anchorId: string, minutesSinceLast
     ORDER BY last_checked ASC
     LIMIT 100
   `;
-  const result = await pool.query(query, [anchorId]);
+  const result = await getPool().query(query, [anchorId]);
   
   return result.rows.map(row => ({
     user_id: row.user_id,
@@ -464,7 +473,7 @@ export async function getApprovedUsers(): Promise<DbUserKycStatus[]> {
       AND (expires_at IS NULL OR expires_at > NOW())
     ORDER BY last_checked DESC
   `;
-  const result = await pool.query(query);
+  const result = await getPool().query(query);
   
   return result.rows.map(row => ({
     user_id: row.user_id,
@@ -475,6 +484,20 @@ export async function getApprovedUsers(): Promise<DbUserKycStatus[]> {
     rejection_reason: row.rejection_reason,
     verification_data: row.verification_data,
   }));
+}
+
+export interface AnchorPollFailureRecord {
+  anchor_id: string;
+  error_message: string;
+  failed_at?: Date;
+}
+
+export async function saveAnchorPollFailure(failure: AnchorPollFailureRecord): Promise<void> {
+  await getPool().query(
+    `INSERT INTO anchor_poll_failures (anchor_id, error_message, failed_at)
+     VALUES ($1, $2, $3)`,
+    [failure.anchor_id, failure.error_message, failure.failed_at ?? new Date()]
+  );
 }
 
 // ========== SEP-24 Transaction Functions ==========
@@ -536,7 +559,7 @@ export async function saveSep24Transaction(
       updated_at = NOW()
   `;
 
-  await pool.query(query, [
+  await getPool().query(query, [
     record.transaction_id,
     record.anchor_id,
     record.direction,
@@ -568,7 +591,7 @@ export async function getSep24Transaction(
     SELECT * FROM sep24_transactions 
     WHERE transaction_id = $1
   `;
-  const result = await pool.query(query, [transactionId]);
+  const result = await getPool().query(query, [transactionId]);
 
   if (result.rows.length === 0) {
     return null;
@@ -601,7 +624,7 @@ export async function getPendingSep24Transactions(
     ORDER BY created_at ASC
     LIMIT 50
   `;
-  const result = await pool.query(query, [anchorId]);
+  const result = await getPool().query(query, [anchorId]);
 
   return result.rows as Sep24TransactionDbRecord[];
 }
@@ -633,7 +656,7 @@ export async function updateSep24TransactionStatus(
     WHERE transaction_id = $1
   `;
 
-  await pool.query(query, [
+  await getPool().query(query, [
     transactionId,
     status,
     amountIn || null,
@@ -657,7 +680,7 @@ export async function getSep24TransactionsByUser(
     ORDER BY created_at DESC
     LIMIT 100
   `;
-  const result = await pool.query(query, [userId]);
+  const result = await getPool().query(query, [userId]);
 
   return result.rows as Sep24TransactionDbRecord[];
 }
@@ -681,7 +704,7 @@ function mapWebhookDeliveryRow(row: Record<string, unknown>): WebhookDelivery {
 }
 
 export async function getActiveWebhookSubscribers(): Promise<WebhookSubscriber[]> {
-  const result = await pool.query(
+  const result = await getPool().query(
     `SELECT id, url, secret, active, created_at, updated_at
      FROM webhook_subscribers
      WHERE active = true`
@@ -703,7 +726,7 @@ export async function enqueueWebhookDelivery(
   payload: unknown,
   maxAttempts: number
 ): Promise<WebhookDelivery> {
-  const result = await pool.query(
+  const result = await getPool().query(
     `INSERT INTO webhook_deliveries (
        event_type, event_key, subscriber_id, target_url, payload,
        max_attempts, status, attempt_count, next_retry_at
@@ -723,7 +746,7 @@ export async function enqueueWebhookDelivery(
 }
 
 export async function getPendingWebhookDeliveries(limit: number): Promise<WebhookDelivery[]> {
-  const result = await pool.query(
+  const result = await getPool().query(
     `SELECT * FROM webhook_deliveries
      WHERE status = 'pending' AND next_retry_at <= NOW()
      ORDER BY next_retry_at ASC
@@ -734,7 +757,7 @@ export async function getPendingWebhookDeliveries(limit: number): Promise<Webhoo
 }
 
 export async function markWebhookDeliverySuccess(id: string, responseStatus: number): Promise<void> {
-  await pool.query(
+  await getPool().query(
     `UPDATE webhook_deliveries
      SET status = 'success', response_status = $2, delivered_at = NOW(), updated_at = NOW()
      WHERE id = $1`,
@@ -751,7 +774,7 @@ export async function markWebhookDeliveryFailure(
   responseStatus: number | null
 ): Promise<void> {
   const status: WebhookDelivery['status'] = attemptCount >= maxAttempts ? 'failed' : 'pending';
-  await pool.query(
+  await getPool().query(
     `UPDATE webhook_deliveries
      SET attempt_count = $2,
          status = $3,
@@ -764,8 +787,151 @@ export async function markWebhookDeliveryFailure(
   );
 }
 
-export { pool };
-
 export function getPool(): Pool {
+  if (!pool) {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) {
+      throw new Error('Missing required environment variable: DATABASE_URL');
+    }
+    pool = new Pool({
+      connectionString,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+    });
+  }
   return pool;
+}
+
+/** Drain and close the PostgreSQL connection pool. Safe to call multiple times. */
+export async function closePool(): Promise<void> {
+  if (pool) {
+    await pool.end();
+  }
+}
+
+// ── Contract Events ──────────────────────────────────────────────────────────
+
+export interface ContractEvent {
+  id?: number;
+  event_type: string;
+  remittance_id?: number | null;
+  actor?: string | null;
+  amount?: string | null;
+  fee?: string | null;
+  tx_hash?: string | null;
+  ledger_sequence?: number | null;
+  timestamp: Date;
+  raw_data?: Record<string, unknown> | null;
+}
+
+export interface ContractEventFilter {
+  event_type?: string;
+  actor?: string;
+  remittance_id?: number;
+  from?: Date;
+  to?: Date;
+  limit?: number;
+  offset?: number;
+}
+
+export async function saveContractEvent(event: ContractEvent): Promise<void> {
+  await getPool().query(
+    `INSERT INTO contract_events
+       (event_type, remittance_id, actor, amount, fee, tx_hash, ledger_sequence, timestamp, raw_data)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT DO NOTHING`,
+    [
+      event.event_type,
+      event.remittance_id ?? null,
+      event.actor ?? null,
+      event.amount ?? null,
+      event.fee ?? null,
+      event.tx_hash ?? null,
+      event.ledger_sequence ?? null,
+      event.timestamp,
+      event.raw_data ? JSON.stringify(event.raw_data) : null,
+    ]
+  );
+}
+
+// ── Webhook Idempotency ──────────────────────────────────────────────────────
+
+/**
+ * Attempts to record a nonce as processed. Returns true if the nonce is new
+ * (safe to process), false if it was already seen (duplicate delivery).
+ *
+ * @param nonce     - The x-nonce header value from the incoming webhook
+ * @param anchorId  - The anchor that sent the webhook
+ * @param ttlSeconds - How long to retain the nonce record (default: 24 h)
+ */
+export async function recordWebhookNonce(
+  nonce: string,
+  anchorId: string,
+  ttlSeconds: number = 86400
+): Promise<boolean> {
+  const result = await getPool().query(
+    `INSERT INTO webhook_processed_nonces (nonce, anchor_id, expires_at)
+     VALUES ($1, $2, NOW() + ($3 || ' seconds')::INTERVAL)
+     ON CONFLICT (nonce, anchor_id) DO NOTHING
+     RETURNING nonce`,
+    [nonce, anchorId, ttlSeconds]
+  );
+  // If a row was inserted, the nonce is new; if nothing was inserted it's a duplicate
+  return result.rowCount !== null && result.rowCount > 0;
+}
+
+/**
+ * Purges expired nonce records. Call this periodically (e.g. from a cron job).
+ */
+export async function purgeExpiredWebhookNonces(): Promise<void> {
+  await getPool().query(
+    `DELETE FROM webhook_processed_nonces WHERE expires_at < NOW()`
+  );
+}
+
+export async function queryContractEvents(
+  filter: ContractEventFilter
+): Promise<{ events: ContractEvent[]; total: number }> {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+  let idx = 1;
+
+  if (filter.event_type) {
+    conditions.push(`event_type = $${idx++}`);
+    params.push(filter.event_type);
+  }
+  if (filter.actor) {
+    conditions.push(`actor = $${idx++}`);
+    params.push(filter.actor);
+  }
+  if (filter.remittance_id !== undefined) {
+    conditions.push(`remittance_id = $${idx++}`);
+    params.push(filter.remittance_id);
+  }
+  if (filter.from) {
+    conditions.push(`timestamp >= $${idx++}`);
+    params.push(filter.from);
+  }
+  if (filter.to) {
+    conditions.push(`timestamp <= $${idx++}`);
+    params.push(filter.to);
+  }
+
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const limit = Math.min(filter.limit ?? 50, 200);
+  const offset = filter.offset ?? 0;
+
+  const [dataResult, countResult] = await Promise.all([
+    getPool().query(
+      `SELECT * FROM contract_events ${where} ORDER BY timestamp DESC LIMIT $${idx} OFFSET $${idx + 1}`,
+      [...params, limit, offset]
+    ),
+    getPool().query(`SELECT COUNT(*) FROM contract_events ${where}`, params),
+  ]);
+
+  return {
+    events: dataResult.rows,
+    total: parseInt(countResult.rows[0].count, 10),
+  };
 }

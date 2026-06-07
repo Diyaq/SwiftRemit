@@ -1,6 +1,6 @@
 import {
   Contract,
-  SorobanRpc,
+  rpc as SorobanRpc,
   TransactionBuilder,
   Networks,
   BASE_FEE,
@@ -18,7 +18,15 @@ import type {
   CreateRemittanceParams,
   BatchCreateEntry,
   GovernanceConfig,
+  DailyLimitStatus,
+  Proposal,
+  RemittanceEvent,
+  RemittanceEventType,
+  SubscribeOptions,
+  Unsubscribe,
 } from "./types.js";
+import { parseContractError, SwiftRemitError, ErrorCode } from "./errors.js";
+import { withRetry } from "./retry.js";
 import {
   parseRemittance,
   parseAgentStats,
@@ -30,19 +38,52 @@ import {
   optionToScVal,
   bytesNToScVal,
   stringToScVal,
+  parseProposal,
 } from "./convert.js";
+
+/** Maximum number of entries allowed in a single batch remittance call. */
+export const MAX_BATCH_SIZE = 50;
+
+function shouldAllowHttp(rpcUrl: string): boolean {
+  let parsedUrl: URL;
+
+  try {
+    parsedUrl = new URL(rpcUrl);
+  } catch {
+    return false;
+  }
+
+  if (parsedUrl.protocol !== "http:") {
+    return false;
+  }
+
+  const hostname = parsedUrl.hostname.toLowerCase();
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
 
 export class SwiftRemitClient {
   private readonly contract: Contract;
   private readonly server: SorobanRpc.Server;
   private readonly networkPassphrase: string;
   private readonly fee: string;
+  private readonly retries: number;
+  private readonly retryDelayMs: number;
+  private readonly retryBackoffFactor: number;
 
   constructor(options: SwiftRemitClientOptions) {
     this.contract = new Contract(options.contractId);
-    this.server = new SorobanRpc.Server(options.rpcUrl, { allowHttp: true });
+    const allowHttp = shouldAllowHttp(options.rpcUrl);
+    this.server = new SorobanRpc.Server(options.rpcUrl, { allowHttp });
+    if (allowHttp) {
+      console.warn(
+        `[SwiftRemitClient] Using insecure HTTP RPC connection for ${options.rpcUrl}. Restrict this to local or test environments.`
+      );
+    }
     this.networkPassphrase = options.networkPassphrase;
     this.fee = options.fee ?? BASE_FEE;
+    this.retries = options.retries ?? 3;
+    this.retryDelayMs = options.retryDelayMs ?? 1000;
+    this.retryBackoffFactor = options.retryBackoffFactor ?? 2;
   }
 
   // ─── Transaction helpers ────────────────────────────────────────────────────
@@ -67,6 +108,8 @@ export class SwiftRemitClient {
 
     const simResult = await this.server.simulateTransaction(tx);
     if (SorobanRpc.Api.isSimulationError(simResult)) {
+      const typed = parseContractError(simResult.error);
+      if (typed) throw typed;
       throw new Error(`Simulation failed: ${simResult.error}`);
     }
     return SorobanRpc.assembleTransaction(tx, simResult).build();
@@ -78,19 +121,37 @@ export class SwiftRemitClient {
     keypair: Keypair
   ): Promise<SorobanRpc.Api.GetSuccessfulTransactionResponse> {
     tx.sign(keypair);
-    const sendResult = await this.server.sendTransaction(tx);
+    const sendResult = await withRetry(
+      () => this.server.sendTransaction(tx),
+      this.retries,
+      this.retryDelayMs,
+      this.retryBackoffFactor
+    );
     if (sendResult.status === "ERROR") {
       throw new Error(`Submit failed: ${JSON.stringify(sendResult.errorResult)}`);
     }
 
-    let getResult = await this.server.getTransaction(sendResult.hash);
+    let getResult = await withRetry(
+      () => this.server.getTransaction(sendResult.hash),
+      this.retries,
+      this.retryDelayMs,
+      this.retryBackoffFactor
+    );
     while (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
       await new Promise((r) => setTimeout(r, 1000));
-      getResult = await this.server.getTransaction(sendResult.hash);
+      getResult = await withRetry(
+        () => this.server.getTransaction(sendResult.hash),
+        this.retries,
+        this.retryDelayMs,
+        this.retryBackoffFactor
+      );
     }
 
     if (getResult.status !== SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-      throw new Error(`Transaction failed: ${JSON.stringify(getResult)}`);
+      const raw = JSON.stringify(getResult);
+      const typed = parseContractError(raw);
+      if (typed) throw typed;
+      throw new Error(`Transaction failed: ${raw}`);
     }
     return getResult as SorobanRpc.Api.GetSuccessfulTransactionResponse;
   }
@@ -111,8 +172,15 @@ export class SwiftRemitClient {
       .setTimeout(30)
       .build();
 
-    const sim = await this.server.simulateTransaction(tx);
+    const sim = await withRetry(
+      () => this.server.simulateTransaction(tx),
+      this.retries,
+      this.retryDelayMs,
+      this.retryBackoffFactor
+    );
     if (SorobanRpc.Api.isSimulationError(sim)) {
+      const typed = parseContractError(sim.error);
+      if (typed) throw typed;
       throw new Error(`Simulation failed: ${sim.error}`);
     }
     const result = (sim as SorobanRpc.Api.SimulateTransactionSuccessResponse)
@@ -296,6 +364,42 @@ export class SwiftRemitClient {
     return BigInt(scValToNative(val) as number);
   }
 
+  /**
+   * Get a sender's daily limit status for a currency/country corridor.
+   *
+   * Returns the configured limit, amount already used in the rolling 24-hour
+   * window, remaining sendable amount, and when the window resets.
+   *
+   * @param sourceAddress - Address used for simulation (can be any funded account)
+   * @param sender - Sender address to query
+   * @param currency - ISO 4217 currency code (e.g. "USDC")
+   * @param country - ISO 3166-1 alpha-2 country code (e.g. "NG")
+   */
+  async getDailyLimitStatus(
+    sourceAddress: string,
+    sender: string,
+    currency: string,
+    country: string
+  ): Promise<DailyLimitStatus> {
+    const val = await this.simulateCall(
+      sourceAddress,
+      "get_daily_limit_status",
+      [
+        addressToScVal(sender),
+        stringToScVal(currency),
+        stringToScVal(country),
+      ]
+    );
+    const native = scValToNative(val) as [bigint | number, bigint | number, bigint | number, bigint | number];
+    const [limit, used, remaining, resetsAtSecs] = native.map(BigInt) as [bigint, bigint, bigint, bigint];
+    return {
+      limit,
+      used,
+      remaining,
+      resetsAt: new Date(Number(resetsAtSecs) * 1000),
+    };
+  }
+
   // ─── Write functions (return prepared tx) ────────────────────────────────────
 
   /**
@@ -374,6 +478,15 @@ export class SwiftRemitClient {
     sender: string,
     entries: BatchCreateEntry[]
   ): Promise<Transaction> {
+    if (entries.length === 0) {
+      throw new SwiftRemitError(ErrorCode.InvalidBatchSize, "Batch must contain at least one entry");
+    }
+    if (entries.length > MAX_BATCH_SIZE) {
+      throw new SwiftRemitError(
+        ErrorCode.InvalidBatchSize,
+        `Batch size ${entries.length} exceeds MAX_BATCH_SIZE (${MAX_BATCH_SIZE})`
+      );
+    }
     const entriesScVal = xdr.ScVal.scvVec(
       entries.map((e) =>
         xdr.ScVal.scvMap([
@@ -511,6 +624,22 @@ export class SwiftRemitClient {
     ]);
   }
 
+  /**
+   * Extend TTLs for critical contract storage keys (admin only).
+   *
+   * Call this periodically (e.g. daily) to prevent instance and persistent
+   * storage entries from expiring. The backend scheduler calls this automatically.
+   *
+   * @param admin - Admin address
+   * @param extendByLedgers - Number of ledgers to extend TTL by (max 3_110_400 ≈ 1 year)
+   */
+  async extendStorageTtl(admin: string, extendByLedgers: number): Promise<Transaction> {
+    return this.prepareTransaction(admin, "extend_storage_ttl", [
+      addressToScVal(admin),
+      xdr.ScVal.scvU32(extendByLedgers),
+    ]);
+  }
+
   /** Add a new admin (existing admin only). */
   async addAdmin(
     caller: string,
@@ -549,6 +678,135 @@ export class SwiftRemitClient {
       quorum: Number(native.quorum),
       timelockSeconds: BigInt(native.timelock_seconds),
       proposalTtlSeconds: BigInt(native.proposal_ttl_seconds),
+    };
+  }
+
+  // ─── Governance ──────────────────────────────────────────────────────────────
+
+  /** Fetch a single proposal by ID. */
+  async getProposal(sourceAddress: string, proposalId: bigint): Promise<Proposal> {
+    const val = await this.simulateCall(sourceAddress, "get_proposal", [
+      u64ToScVal(proposalId),
+    ]);
+    return parseProposal(val);
+  }
+
+  /**
+   * Fetch all proposals with state Pending or Approved.
+   * Iterates proposal IDs starting from 0 until the contract returns NotFound.
+   */
+  async getActiveProposals(sourceAddress: string): Promise<Proposal[]> {
+    const proposals: Proposal[] = [];
+    let id = 0n;
+    while (true) {
+      try {
+        const val = await this.simulateCall(sourceAddress, "get_proposal", [
+          u64ToScVal(id),
+        ]);
+        const p = parseProposal(val);
+        if (p.state === "Pending" || p.state === "Approved") {
+          proposals.push(p);
+        }
+        id++;
+      } catch {
+        break; // ProposalNotFound — no more proposals
+      }
+    }
+    return proposals;
+  }
+
+  /** Cast an approval vote on a pending proposal (admin only). */
+  async voteOnProposal(
+    sourceAddress: string,
+    proposalId: bigint
+  ): Promise<Transaction> {
+    return this.prepareTransaction(sourceAddress, "vote", [
+      addressToScVal(sourceAddress),
+      u64ToScVal(proposalId),
+    ]);
+  }
+
+  /** Execute an approved proposal after the timelock has elapsed (admin only). */
+  async executeProposal(
+    sourceAddress: string,
+    proposalId: bigint
+  ): Promise<Transaction> {
+    return this.prepareTransaction(sourceAddress, "execute", [
+      addressToScVal(sourceAddress),
+      u64ToScVal(proposalId),
+    ]);
+  }
+
+  /**
+   * Subscribe to remittance contract events via polling.
+   * Returns an unsubscribe function that stops polling when called.
+   */
+  subscribeToRemittanceEvents(
+    callback: (event: RemittanceEvent) => void,
+    options: SubscribeOptions = {}
+  ): Unsubscribe {
+    let active = true;
+    let cursor = options.cursor;
+
+    const poll = async (): Promise<void> => {
+      while (active) {
+        try {
+          const result = await this.server.getEvents({
+            filters: [
+              {
+                type: "contract",
+                contractIds: [this.contract.contractId()],
+              },
+            ],
+            ...(cursor ? { cursor } : {}),
+          } as Parameters<typeof this.server.getEvents>[0]);
+
+          for (const raw of (result as { events: unknown[] }).events) {
+            const e = raw as {
+              pagingToken: string;
+              ledger: number;
+              ledgerClosedAt: string;
+              topic: { toXDR: () => Buffer }[];
+              value: { toXDR: () => Buffer };
+            };
+            cursor = e.pagingToken;
+
+            const typeSymbol = xdr.ScVal.fromXDR(e.topic[0].toXDR());
+            const type = scValToNative(typeSymbol) as RemittanceEventType;
+            const idVal = xdr.ScVal.fromXDR(e.topic[1].toXDR());
+            const remittanceId = BigInt(scValToNative(idVal));
+
+            if (
+              options.remittanceId !== undefined &&
+              remittanceId !== options.remittanceId
+            ) {
+              continue;
+            }
+
+            const event: RemittanceEvent = {
+              type,
+              remittanceId,
+              ledger: e.ledger,
+              ledgerClosedAt: e.ledgerClosedAt,
+              raw: {
+                topics: e.topic.map((t) => t.toXDR().toString("base64")),
+                value: e.value.toXDR().toString("base64"),
+              },
+            };
+            callback(event);
+          }
+
+          await new Promise((r) => setTimeout(r, 5_000));
+        } catch {
+          if (!active) break;
+          await new Promise((r) => setTimeout(r, 1_000));
+        }
+      }
+    };
+
+    poll();
+    return () => {
+      active = false;
     };
   }
 }

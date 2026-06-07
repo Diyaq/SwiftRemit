@@ -5,7 +5,7 @@ import {
   markWebhookDeliveryFailure,
   markWebhookDeliverySuccess,
 } from './database';
-import { RemittanceCreatedWebhookPayload, WebhookDelivery } from './types';
+import { RemittanceCreatedWebhookPayload, Sep24ExpiredRefundWebhookPayload, WebhookDelivery } from './types';
 
 const MAX_RETRIES = 5;
 
@@ -25,6 +25,19 @@ export class WebhookDispatcher {
     }
   }
 
+  async dispatchSep24ExpiredRefund(payload: Sep24ExpiredRefundWebhookPayload): Promise<void> {
+    const subscribers = await getActiveWebhookSubscribers();
+    const deliveries = await Promise.all(
+      subscribers.map((subscriber) =>
+        enqueueWebhookDelivery('sep24.expired_refund', payload.transaction_id, subscriber, payload, MAX_RETRIES)
+      )
+    );
+
+    for (const delivery of deliveries) {
+      await this.attemptDelivery(delivery);
+    }
+  }
+
   async retryPendingDeliveries(limit: number = 100): Promise<void> {
     const deliveries = await getPendingWebhookDeliveries(limit);
     for (const delivery of deliveries) {
@@ -32,10 +45,18 @@ export class WebhookDispatcher {
     }
   }
 
+  private validateUrl(url: string): void {
+    if (!url.startsWith('https://')) {
+      throw new Error(`Webhook delivery rejected: URL must use HTTPS (received: ${url})`);
+    }
+  }
+
   private async attemptDelivery(delivery: WebhookDelivery): Promise<void> {
     const nextAttempt = delivery.attempt_count + 1;
 
     try {
+      this.validateUrl(delivery.target_url);
+
       const response = await this.fetchImpl(delivery.target_url, {
         method: 'POST',
         headers: {

@@ -49,6 +49,9 @@ jobs:
       - name: Run tests
         run: cargo test --verbose
 
+      - name: Run legacy-tests feature suite
+        run: cargo test --features legacy-tests --verbose
+
   coverage:
     name: Coverage (tarpaulin ≥ 95%)
     runs-on: ubuntu-latest

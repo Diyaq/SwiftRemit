@@ -22,10 +22,13 @@ const DEFAULT_OPTIONS: WebhookDeliveryOptions = {
 };
 
 export class WebhookDispatcher {
+  private inFlight = 0;
+
   constructor(
     private store: IWebhookStore,
     private logger?: Console | any,
-    private options: WebhookDeliveryOptions = {}
+    private options: WebhookDeliveryOptions = {},
+    private onDeadLetter?: () => void
   ) {
     this.options = { ...DEFAULT_OPTIONS, ...options };
     this.logger = logger || console;
@@ -44,7 +47,7 @@ export class WebhookDispatcher {
   /**
    * Generate webhook headers including signature
    */
-  private generateHeaders(payload: string, secret: string): Record<string, string> {
+  private generateHeaders(payload: string, secret: string, contentType = 'application/json'): Record<string, string> {
     const timestamp = Date.now().toString();
     const webhookId = `webhook_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const signature = this.generateSignature(
@@ -53,7 +56,7 @@ export class WebhookDispatcher {
     );
 
     return {
-      'Content-Type': 'application/json',
+      'Content-Type': contentType,
       'x-webhook-signature': signature,
       'x-webhook-timestamp': timestamp,
       'x-webhook-id': webhookId,
@@ -72,7 +75,8 @@ export class WebhookDispatcher {
   /**
    * Dispatch a webhook event to all subscribers
    */
-  async dispatch(event: EventType, payload: WebhookPayload): Promise<{ success: number; failed: number }> {
+  async dispatch(event: EventType, payload: WebhookPayload, correlationId?: string): Promise<{ success: number; failed: number }> {
+    this.inFlight++;
     try {
       const subscribers = await this.store.getSubscribers(event);
 
@@ -81,23 +85,32 @@ export class WebhookDispatcher {
         return { success: 0, failed: 0 };
       }
 
-      this.logger.info(`Dispatching ${event} to ${subscribers.length} subscriber(s)`);
+      this.logger.info(`Dispatching ${event} to ${subscribers.length} subscriber(s)`, { correlation_id: correlationId });
+
+      // Enrich payload with correlation ID if provided
+      const enrichedPayload = correlationId 
+        ? { ...payload, correlation_id: correlationId }
+        : payload;
 
       let successCount = 0;
       let failedCount = 0;
 
       for (const subscriber of subscribers) {
         try {
-          const deliveryId = await this.store.recordDelivery({
+          const deliveryRecord: Partial<WebhookDeliveryRecord> = {
             webhookId: subscriber.id,
             eventType: event,
-            payload,
+            payload: enrichedPayload,
+            maxRetries: this.options.maxRetries!,
+          };
+
+          const deliveryId = await this.store.recordDelivery({
+            ...deliveryRecord,
             status: 'pending',
             attempt: 0,
-            maxRetries: this.options.maxRetries!,
-          });
+          } as WebhookDeliveryRecord);
 
-          const success = await this.attemptDelivery(deliveryId, subscriber.url, subscriber.secret, payload);
+          const success = await this.attemptDelivery(deliveryId, subscriber.url, subscriber.secret, enrichedPayload, 1, deliveryRecord, subscriber.content_type);
 
           if (success) {
             successCount++;
@@ -115,6 +128,8 @@ export class WebhookDispatcher {
     } catch (error) {
       this.logger.error('Dispatch error:', error);
       throw error;
+    } finally {
+      this.inFlight--;
     }
   }
 
@@ -126,15 +141,36 @@ export class WebhookDispatcher {
     url: string,
     secret: string,
     payload: WebhookPayload,
-    attempt: number = 1
+    attempt: number = 1,
+    deliveryRecord?: Partial<WebhookDeliveryRecord>,
+    contentType: string = 'application/json'
   ): Promise<boolean> {
+    if (!url.startsWith('https://')) {
+      const msg = `Webhook delivery rejected: URL must use HTTPS (received: ${url})`;
+      this.logger.error(msg);
+      await this.store.updateDeliveryStatus(deliveryId, 'failed', attempt, msg);
+      return false;
+    }
+
     try {
-      const payloadJson = JSON.stringify(payload);
-      const headers = this.generateHeaders(payloadJson, secret);
+      const isFormEncoded = contentType === 'application/x-www-form-urlencoded';
+      const serialized = isFormEncoded
+        ? new URLSearchParams(
+            Object.entries(payload as unknown as Record<string, unknown>).reduce<Record<string, string>>(
+              (acc, [k, v]) => {
+                acc[k] = typeof v === 'object' ? JSON.stringify(v) : String(v ?? '');
+                return acc;
+              },
+              {}
+            )
+          ).toString()
+        : JSON.stringify(payload);
+
+      const headers = this.generateHeaders(serialized, secret, contentType);
 
       this.logger.debug(`Attempting delivery ${attempt}/${this.options.maxRetries} to ${url}`);
 
-      const response = await axios.post(url, payload, {
+      const response = await axios.post(url, isFormEncoded ? serialized : payload, {
         headers,
         timeout: this.options.timeoutMs,
         validateStatus: () => true, // Don't throw on any status
@@ -161,12 +197,55 @@ export class WebhookDispatcher {
         await this.store.updateDeliveryStatus(deliveryId, 'pending', attempt, errorMessage);
         await new Promise(resolve => setTimeout(resolve, delay));
 
-        return this.attemptDelivery(deliveryId, url, secret, payload, attempt + 1);
+        return this.attemptDelivery(deliveryId, url, secret, payload, attempt + 1, deliveryRecord, contentType);
       } else {
         await this.store.updateDeliveryStatus(deliveryId, 'failed', attempt, errorMessage);
         this.logger.error(`Delivery ${deliveryId} failed after ${attempt} attempts: ${errorMessage}`);
+
+        // Send to dead-letter queue
+        if (deliveryRecord) {
+          await this.store.sendToDeadLetter({
+            ...deliveryRecord,
+            id: deliveryId,
+            status: 'failed',
+            attempt,
+            error: errorMessage,
+          } as WebhookDeliveryRecord);
+          this.onDeadLetter?.();
+          this.logger.warn(`Delivery ${deliveryId} moved to dead-letter queue`);
+        }
+
         return false;
       }
+    }
+  }
+
+  /**
+   * Drain all in-flight webhook dispatches.
+   *
+   * Waits up to `timeoutMs` for any currently-running `dispatch` or
+   * `attemptDelivery` calls to settle. New dispatches started after
+   * `drain()` is called will still be awaited — callers should stop
+   * enqueuing work before calling this.
+   *
+   * @param timeoutMs Maximum milliseconds to wait (default: 30 000)
+   */
+  async drain(timeoutMs = 30_000): Promise<void> {
+    if (this.inFlight === 0) return;
+
+    this.logger.info(`Draining ${this.inFlight} in-flight webhook dispatch(es)…`);
+
+    const deadline = Date.now() + timeoutMs;
+    while (this.inFlight > 0 && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    }
+
+    if (this.inFlight > 0) {
+      this.logger.warn(
+        `Drain timeout reached with ${this.inFlight} dispatch(es) still in flight. Proceeding with shutdown.`
+      );
+    } else {
+      this.logger.info('All in-flight webhook dispatches completed.');
     }
   }
 
@@ -198,7 +277,9 @@ export class WebhookDispatcher {
           subscriber.url,
           subscriber.secret,
           delivery.payload,
-          delivery.attempt + 1
+          delivery.attempt + 1,
+          delivery,
+          subscriber.content_type
         );
       }
     } catch (error) {

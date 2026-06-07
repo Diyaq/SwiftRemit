@@ -29,17 +29,10 @@ use crate::{
 /// When accumulated fees exceed this value, a flush is automatically triggered.
 /// This prevents integer overflow and ensures regular fee settlement.
 ///
-/// Value: 922,337,203,685,477,580 (approximately 92% of i128::MAX)
-/// This provides a reasonable buffer while allowing for high-volume transactions.
-///
-/// Typical scenario:
-/// - Network volume: 1,000,000 transactions/day
-/// - Average fee: 1000 USDC
-/// - Daily accumulation: 1,000,000,000 USDC/day
-/// - Time to MAX_FEES: ~924,337 days (~2530 years)
-///
-/// This cap ensures safety while allowing for reasonable contract lifetime.
-pub const MAX_FEES: i128 = 9_223_372_036_854_775_807i128 / 10; // ~92% of i128::MAX
+/// Value: approximately 10% of i128::MAX / 2, providing a large safety margin
+/// so that the flush transfer itself (which moves the full accumulated amount)
+/// cannot overflow during the USDC token call (#622).
+pub const MAX_FEES: i128 = i128::MAX / 20; // ~5% of i128::MAX
 
 /// Safely adds a new fee to the accumulated total.
 ///
@@ -88,7 +81,7 @@ pub fn safe_add_accumulated_fee(env: &Env, new_fee: i128) -> Result<(), Contract
     // Perform checked addition to detect overflow when combining fees.
     let new_total = current_fees
         .checked_add(new_fee)
-        .map_err(|_| ContractError::Overflow)?;
+        .ok_or(ContractError::Overflow)?;
 
     // If adding the next fee would exceed the safe cap, flush the current balance
     // and store only the incoming fee as the new accumulated total.
@@ -234,10 +227,13 @@ mod tests {
         assert!(MAX_FEES < i128::MAX);
         assert!(MAX_FEES > 0);
 
-        // Should be approximately 90% of i128::MAX
+        // Should be approximately 5% of i128::MAX (MAX_FEES = i128::MAX / 20)
+        // and well below i128::MAX / 2 to prevent overflow during flush (#622)
         let max_i128 = i128::MAX;
         let ratio = (MAX_FEES as f64) / (max_i128 as f64);
-        assert!(ratio > 0.09 && ratio < 0.11); // Should be ~10%
+        assert!(ratio > 0.04 && ratio < 0.06); // Should be ~5%
+        // Safety margin: MAX_FEES must be less than half of i128::MAX
+        assert!(MAX_FEES < max_i128 / 2);
     }
 
     #[test]
@@ -284,6 +280,6 @@ mod tests {
             None => return true, // Overflow would occur
         };
 
-        total > MAX_FEES
+        total >= MAX_FEES
     }
 }

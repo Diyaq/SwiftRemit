@@ -27,6 +27,8 @@ export interface WebhookRegistrationResponse {
   createdAt?: Date;
 }
 
+const MAX_WEBHOOKS_PER_ACCOUNT = 10;
+
 export class WebhookService {
   private store: IWebhookStore;
   private dispatcher: WebhookDispatcher;
@@ -45,6 +47,10 @@ export class WebhookService {
       throw new Error('Webhook URL is required');
     }
 
+    if (!request.url.startsWith('https://')) {
+      throw new Error('Webhook URL must use HTTPS');
+    }
+
     if (!request.events || request.events.length === 0) {
       throw new Error('At least one event must be subscribed');
     }
@@ -56,12 +62,19 @@ export class WebhookService {
       'remittance.completed',
       'remittance.failed',
       'remittance.cancelled',
+      'kyc.expiry_warning',
     ];
 
     for (const event of request.events) {
       if (!validEvents.includes(event)) {
         throw new Error(`Invalid event type: ${event}`);
       }
+    }
+
+    // Enforce maximum webhook count per account
+    const existing = await this.store.getAllWebhooks();
+    if (existing.length >= MAX_WEBHOOKS_PER_ACCOUNT) {
+      throw new Error(`Maximum webhook limit of ${MAX_WEBHOOKS_PER_ACCOUNT} webhooks per account reached`);
     }
 
     // Register in store

@@ -20,7 +20,7 @@ pub enum Role {
 ///
 /// # State Machine
 ///
-/// ```
+/// ```text
 /// Pending → Processing → Completed
 ///         ↘            ↘
 ///           Cancelled    Cancelled
@@ -56,6 +56,11 @@ pub enum RemittanceStatus {
 
 impl RemittanceStatus {
     /// Returns `true` if this is a terminal state (no further transitions allowed).
+    ///
+    /// `Failed` and `Disputed` are intentionally excluded — they are transient states
+    /// from which further transitions are permitted (`Failed → Disputed`,
+    /// `Disputed → Completed | Cancelled` via `resolve_dispute`).
+    /// Only `Completed` and `Cancelled` are truly terminal.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
@@ -118,6 +123,17 @@ pub struct SettlementConfig {
     pub oracle_address: Option<Address>,
 }
 
+/// Contracttype-compatible wrapper for Option<SettlementConfig>.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaybeSettlementConfig {
+    None,
+    Some(SettlementConfig),
+}
+impl From<Option<SettlementConfig>> for MaybeSettlementConfig {
+    fn from(o: Option<SettlementConfig>) -> Self { match o { None => Self::None, Some(v) => Self::Some(v) } }
+}
+
 /// Escrow status for locked funds
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -137,6 +153,49 @@ pub struct Escrow {
     pub amount: i128,
     pub expiry: Option<u64>,
     pub status: EscrowStatus,
+}
+
+/// Contracttype-compatible Option wrapper for SettlementConfig.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaybeSettlementConfig {
+    None,
+    Some(SettlementConfig),
+}
+
+impl From<Option<SettlementConfig>> for MaybeSettlementConfig {
+    fn from(opt: Option<SettlementConfig>) -> Self {
+        match opt {
+            None => MaybeSettlementConfig::None,
+            Some(v) => MaybeSettlementConfig::Some(v),
+        }
+    }
+}
+
+impl From<MaybeSettlementConfig> for Option<SettlementConfig> {
+    fn from(m: MaybeSettlementConfig) -> Self {
+        match m {
+            MaybeSettlementConfig::None => None,
+            MaybeSettlementConfig::Some(v) => Some(v),
+        }
+    }
+}
+
+/// Contracttype-compatible Option wrapper for BytesN<32>.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaybeBytes32 {
+    None,
+    Some(soroban_sdk::BytesN<32>),
+}
+
+impl From<Option<soroban_sdk::BytesN<32>>> for MaybeBytes32 {
+    fn from(opt: Option<soroban_sdk::BytesN<32>>) -> Self {
+        match opt {
+            None => MaybeBytes32::None,
+            Some(v) => MaybeBytes32::Some(v),
+        }
+    }
 }
 
 /// A remittance transaction record.
@@ -161,7 +220,7 @@ pub struct Remittance {
     /// Optional expiry timestamp (seconds since epoch) for settlement
     pub expiry: Option<u64>,
     /// Optional settlement configuration for proof validation
-    pub settlement_config: Option<SettlementConfig>,
+    pub settlement_config: MaybeSettlementConfig,
     /// The specific token address used for this remittance
     pub token: Address,
     /// Ledger timestamp when the remittance was created
@@ -169,7 +228,7 @@ pub struct Remittance {
     /// Ledger timestamp when the agent marked it as failed, if applicable
     pub failed_at: Option<u64>,
     /// Hash of evidence provided by the sender during a dispute
-    pub dispute_evidence: Option<soroban_sdk::BytesN<32>>,
+    pub dispute_evidence: MaybeBytes32,
 }
 
 #[contracttype]
@@ -179,6 +238,10 @@ pub struct AgentStats {
     pub failed_settlements: u32,
     pub total_settlement_time: u64,
     pub dispute_count: u32,
+    /// Successful payouts / total * 10000 (basis points). Updated on each payout.
+    pub success_rate_bps: u32,
+    /// Ledger timestamp of the most recent confirm_payout or mark_failed call.
+    pub last_active_timestamp: u64,
 }
 
 /// Entry for batch settlement processing.
@@ -188,6 +251,14 @@ pub struct AgentStats {
 pub struct BatchSettlementEntry {
     /// The unique ID of the remittance to settle
     pub remittance_id: u64,
+}
+
+/// Volume history bucket for rolling sender discount calculations.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SenderVolumeEntry {
+    pub bucket_start: u64,
+    pub amount: i128,
 }
 
 /// Entry for batch remittance creation.
@@ -258,6 +329,17 @@ pub enum PauseReason {
     ExternalThreat,
 }
 
+/// Contracttype-compatible wrapper for Option<PauseReason>.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaybePauseReason {
+    None,
+    Some(PauseReason),
+}
+impl From<Option<PauseReason>> for MaybePauseReason {
+    fn from(o: Option<PauseReason>) -> Self { match o { None => Self::None, Some(v) => Self::Some(v) } }
+}
+
 /// Persistent record of a pause event.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -291,7 +373,7 @@ pub struct CircuitBreakerStatus {
     /// Whether the contract is currently paused.
     pub is_paused: bool,
     /// Active pause reason, or `None` when not paused.
-    pub pause_reason: Option<PauseReason>,
+    pub pause_reason: MaybePauseReason,
     /// Ledger timestamp of the active pause, or `None` when not paused.
     pub pause_timestamp: Option<u64>,
     /// Configured timelock duration in seconds (0 = no timelock).
