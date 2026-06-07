@@ -1,6 +1,6 @@
 import { Pool } from 'pg';
 import { KycRecord, KycStatus, UserKycStatus, AnchorKycRecord } from './types';
-import { setKycApprovedOnChain } from './stellar-kyc';
+import { setKycApprovedOnChain, KycOnChainResult } from './stellar-kyc';
 
 const VALID_STATUSES: KycStatus[] = ['pending', 'approved', 'rejected'];
 
@@ -8,6 +8,8 @@ export class ValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ValidationError';
+    // Restore prototype chain so `instanceof ValidationError` works after transpilation
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
@@ -18,7 +20,7 @@ export class KycUpsertService {
       userStellarAddress: string,
       approved: boolean,
       expiresAt?: Date
-    ) => Promise<void> = setKycApprovedOnChain
+    ) => Promise<KycOnChainResult> = setKycApprovedOnChain
   ) {}
 
   /**

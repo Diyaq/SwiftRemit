@@ -37,7 +37,7 @@
 
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, Vec, xdr::ToXdr};
 
-use crate::{config::MAX_MIGRATION_BATCH_SIZE, ContractError, Remittance, RemittanceStatus};
+use crate::{config::MAX_MIGRATION_BATCH_SIZE, AgentStats, ContractError, Remittance, RemittanceStatus};
 
 // ─── Schema version ──────────────────────────────────────────────────────────
 
@@ -126,6 +126,15 @@ pub struct MigrationVerification {
     pub timestamp: u64,
 }
 
+/// Per-agent performance and cap data captured in a rollback snapshot.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AgentStatsSnapshot {
+    pub address: Address,
+    pub stats: AgentStats,
+    pub daily_cap: i128,
+}
+
 /// Pre-migration rollback snapshot stored in instance storage.
 ///
 /// Captured by `migrate()` before any writes so the state can be restored
@@ -139,6 +148,8 @@ pub struct RollbackSnapshot {
     pub ledger_sequence: u32,
     /// All agent records at the time of snapshot.
     pub agents: Vec<AgentRecord>,
+    /// Per-agent stats and daily cap — restored on rollback to prevent data loss.
+    pub agent_stats_snapshot: Vec<AgentStatsSnapshot>,
 }
 
 // ─── Instance key for schema version ─────────────────────────────────────────
@@ -152,6 +163,9 @@ enum MigrationKey {
     RollbackSnapshot,
     /// Tracks the next expected batch index during a cross-contract import.
     ExpectedNextBatch,
+    /// Tracks whether a cross-contract migration is in progress.
+    /// Blocks normal operations until migration completes successfully.
+    MigrationInProgress,
 }
 
 fn get_schema_version(env: &Env) -> u32 {
@@ -206,6 +220,27 @@ fn clear_expected_next_batch(env: &Env) {
         .remove(&MigrationKey::ExpectedNextBatch);
 }
 
+// ─── Migration state helpers ──────────────────────────────────────────────────
+
+fn is_migration_in_progress(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&MigrationKey::MigrationInProgress)
+        .unwrap_or(false)
+}
+
+fn set_migration_in_progress(env: &Env, in_progress: bool) {
+    if in_progress {
+        env.storage()
+            .instance()
+            .set(&MigrationKey::MigrationInProgress, &true);
+    } else {
+        env.storage()
+            .instance()
+            .remove(&MigrationKey::MigrationInProgress);
+    }
+}
+
 // ─── Helper: status byte ─────────────────────────────────────────────────────
 
 fn status_to_byte(status: &RemittanceStatus) -> u8 {
@@ -217,6 +252,17 @@ fn status_to_byte(status: &RemittanceStatus) -> u8 {
         RemittanceStatus::Failed => 4,
         RemittanceStatus::Disputed => 5,
     }
+}
+
+// ─── Public migration state query ─────────────────────────────────────────────
+
+/// Check if a cross-contract migration is currently in progress.
+///
+/// Returns `true` if `import_batch` has been called for the first batch but
+/// not yet completed for the final batch. During this period, normal contract
+/// operations should be blocked to prevent data inconsistency.
+pub fn is_migration_in_progress_public(env: &Env) -> bool {
+    is_migration_in_progress(env)
 }
 
 // ─── migrate() — in-place WASM upgrade entrypoint ────────────────────────────
@@ -261,15 +307,21 @@ pub fn migrate(env: &Env) -> Result<(), ContractError> {
     // ── Step 1: capture rollback snapshot ────────────────────────────────────
     let agent_list = crate::storage::get_agent_list(env);
     let mut snapshot_agents: Vec<AgentRecord> = Vec::new(env);
+    let mut stats_snapshot: Vec<AgentStatsSnapshot> = Vec::new(env);
 
     for i in 0..agent_list.len() {
         let addr = agent_list.get_unchecked(i);
         let registered = crate::storage::is_agent_registered(env, &addr);
         let kyc_hash = crate::storage::get_agent_kyc_hash(env, &addr);
         snapshot_agents.push_back(AgentRecord {
-            address: addr,
+            address: addr.clone(),
             registered,
             kyc_hash,
+        });
+        stats_snapshot.push_back(AgentStatsSnapshot {
+            address: addr.clone(),
+            stats: crate::storage::get_agent_stats(env, &addr),
+            daily_cap: crate::storage::get_agent_daily_cap(env, &addr),
         });
     }
 
@@ -277,6 +329,7 @@ pub fn migrate(env: &Env) -> Result<(), ContractError> {
         from_version: current_version,
         ledger_sequence: env.ledger().sequence(),
         agents: snapshot_agents.clone(),
+        agent_stats_snapshot: stats_snapshot,
     };
     save_rollback_snapshot(env, &rollback);
 
@@ -312,7 +365,7 @@ pub fn migrate(env: &Env) -> Result<(), ContractError> {
     clear_rollback_snapshot(env);
 
     env.events().publish(
-        soroban_sdk::symbol_short!("migrated"),
+        (soroban_sdk::symbol_short!("migrated"),),
         CURRENT_SCHEMA_VERSION,
     );
 
@@ -372,6 +425,13 @@ pub fn rollback_migration(env: &Env) -> Result<(), ContractError> {
         }
     }
 
+    // Restore agent stats and daily caps.
+    for i in 0..snapshot.agent_stats_snapshot.len() {
+        let entry = snapshot.agent_stats_snapshot.get_unchecked(i);
+        crate::storage::set_agent_stats(env, &entry.address, &entry.stats);
+        crate::storage::set_agent_daily_cap(env, &entry.address, entry.daily_cap);
+    }
+
     // Restore the schema version to what it was before the migration attempt.
     set_schema_version(env, snapshot.from_version);
 
@@ -379,7 +439,7 @@ pub fn rollback_migration(env: &Env) -> Result<(), ContractError> {
     clear_rollback_snapshot(env);
 
     env.events().publish(
-        soroban_sdk::symbol_short!("rolled_back"),
+        (soroban_sdk::symbol_short!("rolled_ba"),),
         snapshot.from_version,
     );
 
@@ -442,7 +502,7 @@ pub fn export_state(env: &Env) -> Result<MigrationSnapshot, ContractError> {
     }
 
     // Collect all registered agents via the AgentList index.
-    let agent_addresses = crate::storage::get_agent_list(env);
+    let agent_addresses = crate::storage::get_admin_list(env);
     let mut agents: Vec<AgentRecord> = Vec::new(env);
     for i in 0..agent_addresses.len() {
         let addr = agent_addresses.get_unchecked(i);
@@ -600,7 +660,11 @@ pub fn export_batch(
     })
 }
 
-/// Import a single batch of remittances.
+/// Import a single batch of remittances with checkpoint/resume semantics.
+///
+/// Sets `MigrationInProgress` flag at the start of the first batch and clears it
+/// after the final batch completes successfully. If any batch fails, the flag
+/// remains set, blocking normal operations until the migration is resumed or rolled back.
 pub fn import_batch(env: &Env, batch: MigrationBatch) -> Result<(), ContractError> {
     let computed_hash = compute_batch_hash(env, &batch.remittances, batch.batch_number);
 
@@ -614,6 +678,12 @@ pub fn import_batch(env: &Env, batch: MigrationBatch) -> Result<(), ContractErro
         return Err(ContractError::InvalidMigrationBatch);
     }
 
+    // Set migration flag on first batch
+    if batch.batch_number == 0 {
+        set_migration_in_progress(env, true);
+    }
+
+    // Import remittances for this batch
     for i in 0..batch.remittances.len() {
         let remittance = batch.remittances.get_unchecked(i);
         crate::storage::set_remittance(env, remittance.id, &remittance);
@@ -622,9 +692,10 @@ pub fn import_batch(env: &Env, batch: MigrationBatch) -> Result<(), ContractErro
     // Advance the counter for the next expected batch.
     set_expected_next_batch(env, expected + 1);
 
-    // Clear the counter after the final batch so it doesn't linger.
+    // Clear the flag after the final batch completes successfully
     if batch.batch_number == batch.total_batches.saturating_sub(1) {
         clear_expected_next_batch(env);
+        set_migration_in_progress(env, false);
     }
 
     Ok(())

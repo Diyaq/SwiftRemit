@@ -91,6 +91,8 @@ export interface AnchorKycConfig {
   auth_token: string;
   polling_interval_minutes: number;
   enabled: boolean;
+  /** Base delay in ms between requests for this anchor. Defaults to 1000ms if not set. */
+  inter_request_delay_ms?: number;
 }
 
 /** Raw database row from user_kyc_status table */
@@ -112,6 +114,15 @@ export interface RemittanceCreatedWebhookPayload {
   fee: string;
   expiry: string;
   memo?: string;
+}
+
+export interface Sep24ExpiredRefundWebhookPayload {
+  transaction_id: string;
+  anchor_id: string;
+  user_id: string;
+  asset_code: string;
+  amount?: string;
+  refunded_at: string;
 }
 
 /** Remittance creation request body */

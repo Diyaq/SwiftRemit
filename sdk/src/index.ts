@@ -1,8 +1,13 @@
-export { SwiftRemitClient } from "./client.js";
+export { SwiftRemitClient, MAX_BATCH_SIZE } from "./client.js";
+export { SwiftRemitError, ErrorCode, parseContractError } from "./errors.js";
 export type {
   SwiftRemitClientOptions,
   Remittance,
   RemittanceStatus,
+  RemittanceEvent,
+  RemittanceEventType,
+  SubscribeOptions,
+  Unsubscribe,
   AgentStats,
   CircuitBreakerStatus,
   PauseReason,
@@ -14,6 +19,7 @@ export type {
   EscrowStatus,
   Role,
   GovernanceConfig,
+  DailyLimitStatus,
 } from "./types.js";
 export {
   parseRemittance,
@@ -21,6 +27,7 @@ export {
   parseCircuitBreakerStatus,
   parseHealthStatus,
   parseFeeBreakdown,
+  parseProposal,
   addressToScVal,
   u64ToScVal,
   i128ToScVal,
@@ -40,6 +47,8 @@ export const RpcUrls = {
   TESTNET: "https://soroban-testnet.stellar.org",
   MAINNET: "https://soroban-mainnet.stellar.org",
 } as const;
+
+export { withRetry, isTransientError } from "./retry.js";
 
 /** USDC multiplier: 1 USDC = 10_000_000 stroops. */
 export const USDC_MULTIPLIER = 10_000_000n;

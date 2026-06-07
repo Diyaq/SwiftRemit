@@ -73,8 +73,9 @@ pub fn do_emergency_pause(
     // Set the shared paused flag (read by validate_not_paused in validation.rs).
     set_paused(env, true);
 
-    // Reset vote count for the new pause instance.
-    cb_storage::set_vote_count(env, 0);
+    // Reset vote count for the new pause instance (new seq key starts at 0,
+    // but we write explicitly for clarity).
+    cb_storage::set_vote_count(env, seq, 0);
 
     // Emit the circuit-breaker paused event.
     emit_circuit_breaker_paused(env, caller.clone(), timestamp, reason);
@@ -128,7 +129,8 @@ pub fn do_emergency_unpause(
 
         // Enforce quorum: enough admin votes must have been cast.
         let quorum = cb_storage::get_unpause_quorum(env);
-        let votes = cb_storage::get_vote_count(env);
+        let active_seq = cb_storage::get_active_pause_seq(env).unwrap_or(0);
+        let votes = cb_storage::get_vote_count(env, active_seq);
         if votes < quorum {
             return Err(ContractError::Unauthorized);
         }
@@ -183,15 +185,19 @@ pub fn do_vote_unpause(env: &Env, caller: &Address) -> Result<(), ContractError>
         return Err(ContractError::AlreadyVoted);
     }
 
+    // Reject votes after quorum has already been reached to prevent spurious
+    // state writes and events in the same pause cycle.
+    let quorum = cb_storage::get_unpause_quorum(env);
+    if cb_storage::get_vote_count(env, pause_seq) >= quorum {
+        return Err(ContractError::AlreadyVoted);
+    }
+
     // Record the vote and increment the count.
     cb_storage::record_vote(env, pause_seq, caller);
-    let new_count = cb_storage::get_vote_count(env)
+    let new_count = cb_storage::get_vote_count(env, pause_seq)
         .checked_add(1)
         .ok_or(ContractError::Overflow)?;
-    cb_storage::set_vote_count(env, new_count);
-
-    // Auto-unpause when quorum is reached (timelock still applies).
-    let quorum = cb_storage::get_unpause_quorum(env);
+    cb_storage::set_vote_count(env, pause_seq, new_count);
     if new_count >= quorum {
         // bypass_timelock_quorum = false: timelock is still enforced.
         do_emergency_unpause(env, caller, false)?;
@@ -211,15 +217,15 @@ pub fn build_status(env: &Env) -> CircuitBreakerStatus {
     let (pause_reason, pause_timestamp) = if paused {
         if let Some(seq) = cb_storage::get_active_pause_seq(env) {
             if let Some(record) = cb_storage::get_pause_record_by_seq(env, seq) {
-                (Some(record.reason), Some(record.timestamp))
+                (crate::MaybePauseReason::Some(record.reason), Some(record.timestamp))
             } else {
-                (None, None)
+                (crate::MaybePauseReason::None, None)
             }
         } else {
-            (None, None)
+            (crate::MaybePauseReason::None, None)
         }
     } else {
-        (None, None)
+        (crate::MaybePauseReason::None, None)
     };
 
     CircuitBreakerStatus {
@@ -228,6 +234,9 @@ pub fn build_status(env: &Env) -> CircuitBreakerStatus {
         pause_timestamp,
         timelock_seconds: cb_storage::get_timelock_seconds(env),
         unpause_quorum: cb_storage::get_unpause_quorum(env),
-        current_vote_count: cb_storage::get_vote_count(env),
+        current_vote_count: cb_storage::get_vote_count(
+            env,
+            cb_storage::get_active_pause_seq(env).unwrap_or(0),
+        ),
     }
 }

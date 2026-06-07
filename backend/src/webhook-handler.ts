@@ -7,6 +7,12 @@ import { KycUpsertService } from './kyc-upsert-service';
 import { Sep24Service } from './sep24-service';
 import { WebhookDispatcher } from './webhook-dispatcher';
 import type { RemittanceCreatedWebhookPayload } from './types';
+import { validateAnchorToml } from './anchor-toml-validator';
+import { recordWebhookNonce } from './database';
+
+class WebhookAuthError extends Error {
+  constructor(message: string) { super(message); this.name = 'WebhookAuthError'; }
+}
 
 interface WebhookRequest extends Request {
   rawBody?: string;
@@ -18,6 +24,7 @@ export class WebhookHandler {
   private stateManager: TransactionStateManager;
   private kycUpsertService: KycUpsertService;
   private sep24Service: Sep24Service;
+  private sep24Initialized = false;
   private dispatcher: WebhookDispatcher;
 
   constructor(private pool: Pool) {
@@ -69,7 +76,17 @@ export class WebhookHandler {
         return;
       }
 
-      const { public_key, webhook_secret } = anchorResult.rows[0];
+      const { public_key, webhook_secret, home_domain } = anchorResult.rows[0];
+
+      // Validate anchor domain against stellar.toml SIGNING_KEY
+      if (home_domain) {
+        const tomlValid = await validateAnchorToml(home_domain, public_key);
+        if (!tomlValid) {
+          await this.logSuspicious(anchorId, 'stellar.toml SIGNING_KEY mismatch', req.body);
+          res.status(403).json({ error: 'Anchor domain validation failed' });
+          return;
+        }
+      }
 
       // Verify timestamp
       if (!this.verifier.validateTimestamp(timestamp)) {
@@ -78,7 +95,14 @@ export class WebhookHandler {
         return;
       }
 
-      // Verify nonce
+      // Idempotency check — return 200 immediately for already-processed nonces
+      const isNewNonce = await recordWebhookNonce(nonce, anchorId);
+      if (!isNewNonce) {
+        res.status(200).json({ success: true, duplicate: true });
+        return;
+      }
+
+      // In-memory nonce guard (replay attack within the current process window)
       if (!this.verifier.validateNonce(nonce)) {
         await this.logSuspicious(anchorId, 'Duplicate nonce (replay attack)', req.body);
         res.status(401).json({ error: 'Invalid nonce' });
@@ -138,6 +162,15 @@ export class WebhookHandler {
         case 'sep24_withdrawal_update':
           await this.handleSep24Update(req.body);
           break;
+        case 'daily_limit_updated':
+          await this.handleDailyLimitUpdated(req.body);
+          break;
+        case 'dispute_raised':
+          await this.handleDisputeRaised(req.body);
+          break;
+        case 'dispute_resolved':
+          await this.handleDisputeResolved(req.body);
+          break;
         default:
           res.status(400).json({ error: 'Unknown event type' });
           return;
@@ -150,6 +183,10 @@ export class WebhookHandler {
       });
 
     } catch (error) {
+      if (error instanceof WebhookAuthError) {
+        res.status(403).json({ error: error.message });
+        return;
+      }
       console.error('Webhook processing error:', error);
       res.status(500).json({ error: 'Internal server error' });
     }
@@ -249,9 +286,125 @@ export class WebhookHandler {
   }
 
   /**
+   * Handle daily_limit_updated contract event.
+   * Logs the change for audit purposes.
+   */
+  private async handleDailyLimitUpdated(payload: any): Promise<void> {
+    const { currency, country, old_limit, new_limit, admin, ledger_sequence, timestamp } = payload;
+    console.info(
+      `[daily_limit_updated] currency=${currency} country=${country} ` +
+      `old=${old_limit ?? 'unset'} new=${new_limit} admin=${admin} ` +
+      `ledger=${ledger_sequence} ts=${timestamp}`
+    );
+    await this.pool.query(
+      `INSERT INTO daily_limit_audit_log
+         (currency, country, old_limit, new_limit, admin_address, ledger_sequence, event_timestamp, recorded_at)
+       VALUES ($1, $2, $3, $4, $5, $6, to_timestamp($7), NOW())
+       ON CONFLICT DO NOTHING`,
+      [currency, country, old_limit, new_limit, admin, ledger_sequence, timestamp]
+    ).catch((err: Error) => {
+      // Table may not exist yet; log and continue rather than failing the webhook
+      console.warn('[daily_limit_updated] audit log insert failed (table may not exist):', err.message);
+    });
+  }
+
+  /**
+   * Handle dispute_raised contract event.
+   * Validates transaction state, enforces the 7-day dispute window, and transitions to 'disputed'.
+   */
+  private async handleDisputeRaised(payload: any): Promise<void> {
+    const transaction_id: string | undefined = payload.transaction_id || payload.remittance_id;
+    if (!transaction_id) throw new Error('Missing transaction_id in dispute_raised payload');
+
+    const result = await this.pool.query<{ status: string }>(
+      'SELECT status FROM transactions WHERE transaction_id = $1',
+      [transaction_id]
+    );
+    const currentStatus = result.rows[0]?.status;
+    if (!currentStatus) throw new Error(`Transaction not found: ${transaction_id}`);
+
+    const allowedPreStates = ['failed', 'error'];
+    if (!allowedPreStates.includes(currentStatus)) {
+      throw new Error(`Cannot raise dispute on transaction in state: ${currentStatus}`);
+    }
+
+    if (payload.failed_at) {
+      const failedAt = new Date(payload.failed_at);
+      const windowMs = 7 * 24 * 3600 * 1000;
+      if (Date.now() - failedAt.getTime() > windowMs) {
+        throw new Error('Dispute window has expired (>7 days since failure)');
+      }
+    }
+
+    await this.pool.query(
+      'UPDATE transactions SET status = $1, updated_at = NOW() WHERE transaction_id = $2',
+      ['disputed', transaction_id]
+    );
+
+    const { sender, evidence_hash, ledger_sequence, timestamp } = payload;
+    console.info(`[dispute_raised] tx=${transaction_id} sender=${sender} evidence=${evidence_hash}`);
+    await this.pool.query(
+      `INSERT INTO dispute_audit_log
+         (remittance_id, event_type, sender, evidence_hash, ledger_sequence, event_timestamp, recorded_at)
+       VALUES ($1, 'raised', $2, $3, $4, to_timestamp($5), NOW())
+       ON CONFLICT DO NOTHING`,
+      [transaction_id, sender, evidence_hash, ledger_sequence, timestamp]
+    ).catch((err: Error) => {
+      console.warn('[dispute_raised] audit log insert failed (table may not exist):', err.message);
+    });
+  }
+
+  /**
+   * Handle dispute_resolved contract event.
+   * Requires admin_id in payload. Transitions 'disputed' transactions to 'refunded' or 'completed'.
+   */
+  private async handleDisputeResolved(payload: any): Promise<void> {
+    const { admin_id, transaction_id: txId, remittance_id, resolution } = payload;
+
+    if (!admin_id) {
+      throw new WebhookAuthError('Admin ID required for dispute resolution');
+    }
+
+    const transaction_id = txId || remittance_id;
+    if (!transaction_id) throw new Error('Missing transaction_id in dispute_resolved payload');
+
+    const result = await this.pool.query<{ status: string }>(
+      'SELECT status FROM transactions WHERE transaction_id = $1',
+      [transaction_id]
+    );
+    const currentStatus = result.rows[0]?.status;
+    if (!currentStatus) throw new Error(`Transaction not found: ${transaction_id}`);
+    if (currentStatus !== 'disputed') {
+      throw new Error(`Cannot resolve dispute on transaction in state: ${currentStatus}`);
+    }
+
+    const newStatus = resolution === 'sender' ? 'refunded' : 'completed';
+    await this.pool.query(
+      'UPDATE transactions SET status = $1, updated_at = NOW() WHERE transaction_id = $2',
+      [newStatus, transaction_id]
+    );
+
+    const { admin, in_favour_of_sender, resulting_status, ledger_sequence, timestamp } = payload;
+    console.info(`[dispute_resolved] tx=${transaction_id} admin=${admin_id} resolution=${resolution}`);
+    await this.pool.query(
+      `INSERT INTO dispute_audit_log
+         (remittance_id, event_type, admin_address, in_favour_of_sender, resulting_status, ledger_sequence, event_timestamp, recorded_at)
+       VALUES ($1, 'resolved', $2, $3, $4, $5, to_timestamp($6), NOW())
+       ON CONFLICT DO NOTHING`,
+      [transaction_id, admin || admin_id, in_favour_of_sender, resulting_status, ledger_sequence, timestamp]
+    ).catch((err: Error) => {
+      console.warn('[dispute_resolved] audit log insert failed (table may not exist):', err.message);
+    });
+  }
+
+  /**
    * Handle SEP-24 deposit/withdrawal update webhook
    */
   private async handleSep24Update(payload: any): Promise<void> {
+    if (!this.sep24Initialized) {
+      await this.sep24Service.initialize();
+      this.sep24Initialized = true;
+    }
     await this.sep24Service.handleWebhookNotification({
       transaction_id: payload.transaction_id,
       status: payload.status,

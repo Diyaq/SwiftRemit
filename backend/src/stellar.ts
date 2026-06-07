@@ -3,16 +3,22 @@ import {
   Contract,
   SorobanRpc,
   TransactionBuilder,
-  Networks,
   Address,
   nativeToScVal,
   xdr,
 } from '@stellar/stellar-sdk';
 import { AssetVerification, VerificationStatus } from './types';
+import { getStellarRuntimeConfig } from './stellar-network';
 
-const server = new SorobanRpc.Server(
-  process.env.HORIZON_URL || 'https://soroban-testnet.stellar.org'
-);
+const { rpcUrl, networkPassphrase } = getStellarRuntimeConfig();
+const server = new SorobanRpc.Server(rpcUrl);
+
+export async function getBaseFee(): Promise<string> {
+  const envFee = process.env.STELLAR_BASE_FEE;
+  if (envFee) return envFee;
+  const feeStats = await server.getFeeStats();
+  return feeStats.inclusionFee.mode;
+}
 
 export async function storeVerificationOnChain(
   verification: AssetVerification
@@ -48,8 +54,8 @@ export async function storeVerificationOnChain(
 
   // Build transaction
   const tx = new TransactionBuilder(account, {
-    fee: '1000',
-    networkPassphrase: Networks.TESTNET,
+    fee: await getBaseFee(),
+    networkPassphrase,
   })
     .addOperation(
       contract.call(
@@ -118,7 +124,7 @@ export async function simulateSettlement(
 
   const tx = new TransactionBuilder(sourceAccount, {
     fee: '100',
-    networkPassphrase: Networks.TESTNET,
+    networkPassphrase,
   })
     .addOperation(
       contract.call(
@@ -159,6 +165,57 @@ export async function simulateSettlement(
   }
 }
 
+/**
+ * Call cancel_remittance on the Soroban contract to release escrowed funds.
+ * Uses the admin keypair as the authorized caller.
+ */
+export async function cancelRemittanceOnChain(remittanceId: number): Promise<void> {
+  const contractId = process.env.CONTRACT_ID;
+  if (!contractId) throw new Error('CONTRACT_ID not configured');
+
+  const adminSecret = process.env.ADMIN_SECRET_KEY;
+  if (!adminSecret) throw new Error('ADMIN_SECRET_KEY not configured');
+
+  const adminKeypair = Keypair.fromSecret(adminSecret);
+  const contract = new Contract(contractId);
+  const account = await server.getAccount(adminKeypair.publicKey());
+
+  const tx = new TransactionBuilder(account, {
+    fee: await getBaseFee(),
+    networkPassphrase,
+  })
+    .addOperation(
+      contract.call(
+        'cancel_remittance',
+        nativeToScVal(remittanceId, { type: 'u64' })
+      )
+    )
+    .setTimeout(30)
+    .build();
+
+  const simulated = await server.simulateTransaction(tx);
+  if (SorobanRpc.Api.isSimulationError(simulated)) {
+    throw new Error(`Simulation failed: ${simulated.error}`);
+  }
+
+  const prepared = SorobanRpc.assembleTransaction(tx, simulated).build();
+  prepared.sign(adminKeypair);
+
+  const result = await server.sendTransaction(prepared);
+
+  let status = await server.getTransaction(result.hash);
+  while (status.status === 'NOT_FOUND') {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    status = await server.getTransaction(result.hash);
+  }
+
+  if (status.status === 'FAILED') {
+    throw new Error(`cancel_remittance failed: ${status.resultXdr}`);
+  }
+
+  console.log(`cancel_remittance called on-chain for remittance ${remittanceId}`);
+}
+
 export async function updateKycStatusOnChain(
   userId: string,
   approved: boolean
@@ -184,8 +241,8 @@ export async function updateKycStatusOnChain(
 
   // Build transaction
   const tx = new TransactionBuilder(account, {
-    fee: '1000',
-    networkPassphrase: Networks.TESTNET,
+    fee: await getBaseFee(),
+    networkPassphrase,
   })
     .addOperation(
       contract.call(
@@ -224,4 +281,52 @@ export async function updateKycStatusOnChain(
   }
 
   console.log(`Updated KYC status on-chain for user ${userId}: ${approved ? 'approved' : 'revoked'}`);
+}
+
+export interface DailyLimitUpdatedEvent {
+  currency: string;
+  country: string;
+  old_limit: string | null;
+  new_limit: string;
+  admin: string;
+  ledger_sequence: number;
+  timestamp: number;
+}
+
+/**
+ * Parses a `limit.updated` contract event from a Soroban event entry.
+ * Returns null if the event does not match the expected topic/structure.
+ */
+export function parseDailyLimitUpdatedEvent(
+  topics: xdr.ScVal[],
+  value: xdr.ScVal
+): DailyLimitUpdatedEvent | null {
+  try {
+    if (topics.length < 2) return null;
+    if (topics[0].sym() !== 'limit' || topics[1].sym() !== 'updated') return null;
+
+    const vals = value.vec();
+    if (!vals || vals.length < 8) return null;
+
+    // Schema: (schema_version, ledger_sequence, timestamp, currency, country, old_limit, new_limit, admin)
+    const ledgerSequence = vals[1].u32();
+    const timestamp = Number(vals[2].u64().toString());
+    const currency = vals[3].str().toString();
+    const country = vals[4].str().toString();
+    const oldLimitVal = vals[5];
+    const old_limit = oldLimitVal.switch().name === 'scvVoid'
+      ? null
+      : oldLimitVal.vec()?.[0]?.i128()
+        ? (BigInt(oldLimitVal.vec()![0].i128().hi().toString()) << BigInt(64) |
+           BigInt(oldLimitVal.vec()![0].i128().lo().toString())).toString()
+        : null;
+    const newI128 = vals[6].i128();
+    const new_limit = ((BigInt(newI128.hi().toString()) << BigInt(64)) |
+                        BigInt(newI128.lo().toString())).toString();
+    const admin = Address.fromScVal(vals[7]).toString();
+
+    return { currency, country, old_limit, new_limit, admin, ledger_sequence: ledgerSequence, timestamp };
+  } catch {
+    return null;
+  }
 }

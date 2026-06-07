@@ -9,7 +9,8 @@ export type EventType =
   | 'remittance.updated'
   | 'remittance.completed'
   | 'remittance.failed'
-  | 'remittance.cancelled';
+  | 'remittance.cancelled'
+  | 'kyc.expiry_warning';
 
 export interface WebhookSubscriber {
   id: string;
@@ -17,6 +18,8 @@ export interface WebhookSubscriber {
   events: EventType[];
   secret: string;
   active: boolean;
+  /** Content-Type to use when delivering payloads. Defaults to 'application/json'. */
+  content_type?: 'application/json' | 'application/x-www-form-urlencoded';
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -26,6 +29,7 @@ export interface WebhookPayload<T = any> {
   timestamp: string;
   data: T;
   id?: string; // Unique event ID for idempotency
+  correlation_id?: string; // Correlation ID for end-to-end tracing
 }
 
 export interface RemittanceData {
@@ -39,6 +43,7 @@ export interface RemittanceData {
   metadata?: Record<string, any>;
   createdAt: string;
   updatedAt: string;
+  correlation_id?: string; // Correlation ID for tracing
 }
 
 export interface RemittanceEventPayload extends WebhookPayload {
@@ -71,4 +76,29 @@ export interface WebhookSignatureHeaders {
   'x-webhook-signature': string;
   'x-webhook-timestamp': string;
   'x-webhook-id': string;
+}
+
+export interface DeadLetterRecord {
+  id: string;
+  deliveryId: string;
+  webhookId: string;
+  eventType: EventType;
+  payload: any;
+  lastError?: string;
+  attempts: number;
+  createdAt: Date;
+  replayedAt?: Date;
+}
+
+export interface KycExpiryWarningData {
+  user_id: string;
+  anchor_id: string;
+  expires_at: string;
+  days_until_expiry: number;
+  renewal_url: string;
+}
+
+export interface KycExpiryWarningPayload extends WebhookPayload {
+  event: 'kyc.expiry_warning';
+  data: KycExpiryWarningData;
 }

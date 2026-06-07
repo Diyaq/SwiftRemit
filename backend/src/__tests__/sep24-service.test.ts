@@ -18,7 +18,11 @@ vi.mock('../database', async (importOriginal) => {
       { anchor_id: 'anchor_test', kyc_server_url: 'http://localhost:0/sep24' },
     ]),
     saveSep24Transaction: vi.fn(async (record) => {
-      sep24Rows.set(record.transaction_id, { ...sep24Rows.get(record.transaction_id), ...record });
+      sep24Rows.set(record.transaction_id, {
+        created_at: new Date(),
+        ...sep24Rows.get(record.transaction_id),
+        ...record,
+      });
     }),
     getSep24Transaction: vi.fn(async (transactionId: string) => sep24Rows.get(transactionId) ?? null),
     getSep24TransactionById: vi.fn(async (transactionId: string) => sep24Rows.get(transactionId) ?? null),
@@ -52,6 +56,22 @@ class MockSep24AnchorServer {
   private server: http.Server | null = null;
   private port: number = 0;
   private transactions: Map<string, { status: string; amount_in?: string; amount_out?: string }> = new Map();
+  private timeoutEnabled: boolean = false;
+  private timeoutPaths: Set<string> = new Set();
+
+  enableTimeoutSimulation(paths: string[] = ['/sep24/deposit', '/sep24/withdraw', '/sep24/transaction']): void {
+    this.timeoutEnabled = true;
+    paths.forEach((p) => this.timeoutPaths.add(p));
+  }
+
+  disableTimeoutSimulation(): void {
+    this.timeoutEnabled = false;
+    this.timeoutPaths.clear();
+  }
+
+  private shouldTimeout(path: string): boolean {
+    return this.timeoutEnabled && this.timeoutPaths.has(path);
+  }
 
   async start(): Promise<string> {
     this.app = express();
@@ -59,6 +79,10 @@ class MockSep24AnchorServer {
 
     // Mock /deposit endpoint (SEP-24)
     this.app.post('/sep24/deposit', (req: Request, res: Response) => {
+      if (this.shouldTimeout('/sep24/deposit')) {
+        // Never respond — simulates a network timeout
+        return;
+      }
       const { transaction_id, asset_code, amount } = req.body;
       
       if (!transaction_id || !asset_code || !amount) {
@@ -82,6 +106,9 @@ class MockSep24AnchorServer {
 
     // Mock /withdraw endpoint (SEP-24)
     this.app.post('/sep24/withdraw', (req: Request, res: Response) => {
+      if (this.shouldTimeout('/sep24/withdraw')) {
+        return;
+      }
       const { transaction_id, asset_code, amount } = req.body;
       
       if (!transaction_id || !asset_code || !amount) {
@@ -102,6 +129,9 @@ class MockSep24AnchorServer {
 
     // Mock /transaction endpoint (SEP-24 status query)
     this.app.get('/sep24/transaction', (req: Request, res: Response) => {
+      if (this.shouldTimeout('/sep24/transaction')) {
+        return;
+      }
       const { id } = req.query;
       
       if (!id) {
@@ -164,8 +194,10 @@ class MockSep24AnchorServer {
   }
 }
 
-// Pool is unused by Sep24Service (database access is via imported helpers); stub for constructor
-const createMockPool = (): Pool => ({}) as Pool;
+// Pool used by Sep24Service.initialize() to fetch anchor metadata
+const createMockPool = (): Pool => ({
+  query: vi.fn().mockResolvedValue({ rows: [] }),
+}) as unknown as Pool;
 
 describe('Sep24Service', () => {
   let mockServer: MockSep24AnchorServer;
@@ -259,6 +291,39 @@ describe('Sep24Service', () => {
       
       // Poll - should not throw
       await service.pollAllTransactions();
+    });
+  });
+
+  describe('anchor timeout (pending_anchor)', () => {
+    it('transitions pending_anchor transaction to error after timeout and increments counter', async () => {
+      // Set a very short timeout (0 hours) so any transaction is immediately stale
+      process.env.ANCHOR_TIMEOUT_HOURS = '0';
+      const timeoutService = new Sep24Service(pool);
+      await timeoutService.initialize();
+
+      const request: Sep24InitiateRequest = {
+        user_id: 'timeout-user',
+        anchor_id: 'anchor_test',
+        direction: 'deposit',
+        asset_code: 'USDC',
+        amount: '50.00',
+      };
+
+      const result = await timeoutService.initiateFlow(request);
+
+      // Confirm it starts as pending_anchor
+      const before = await timeoutService.getTransactionStatus(result.transaction_id);
+      expect(before?.status).toBe('pending_anchor');
+
+      // Poll — should detect timeout and mark as error
+      await timeoutService.pollAllTransactions();
+
+      const after = await timeoutService.getTransactionStatus(result.transaction_id);
+      expect(after?.status).toBe('error');
+      expect(timeoutService.getStalledTransactionsTotal()).toBe(1);
+
+      // Restore default
+      process.env.ANCHOR_TIMEOUT_HOURS = '24';
     });
   });
 
@@ -358,10 +423,10 @@ describe('Error Handling', () => {
 
   it('should handle anchor connection error', async () => {
     process.env.SEP24_SERVER_ANCHOR_TEST = 'http://localhost:9999/nonexistent';
-    
+
     const service = new Sep24Service(pool);
     await service.initialize();
-    
+
     const request: Sep24InitiateRequest = {
       user_id: 'test-user-123',
       anchor_id: 'anchor_test',
@@ -371,5 +436,121 @@ describe('Error Handling', () => {
     };
 
     await expect(service.initiateFlow(request)).rejects.toThrow();
+  });
+});
+
+describe('Timeout Handling', () => {
+  let mockServer: MockSep24AnchorServer;
+  let serverUrl: string;
+  let pool: Pool;
+
+  beforeEach(async () => {
+    mockServer = new MockSep24AnchorServer();
+    serverUrl = await mockServer.start();
+    pool = createMockPool();
+
+    process.env.SEP24_ENABLED_ANCHOR_TEST = 'true';
+    process.env.SEP24_SERVER_ANCHOR_TEST = serverUrl + '/sep24';
+    process.env.SEP24_POLL_INTERVAL_ANCHOR_TEST = '1';
+    // Very short timeout (1 ms) so the hanging server triggers a timeout error
+    process.env.SEP24_TIMEOUT_ANCHOR_TEST = '1';
+    process.env.SEP24_TIMEOUT_ANCHOR_TEST = '1';
+    // Short HTTP timeout so the hanging mock server triggers timeout quickly
+    process.env.SEP24_HTTP_TIMEOUT_MS = '200';
+    resetSep24Rows();
+  });
+
+  afterEach(async () => {
+    mockServer.disableTimeoutSimulation();
+    await mockServer.stop();
+    resetSep24Rows();
+    vi.clearAllMocks();
+    delete process.env.SEP24_HTTP_TIMEOUT_MS;
+  });
+
+  it('should reject deposit initiation with a timeout error when the anchor does not respond', async () => {
+    mockServer.enableTimeoutSimulation(['/sep24/deposit']);
+
+    const service = new Sep24Service(pool);
+    await service.initialize();
+
+    const request: Sep24InitiateRequest = {
+      user_id: 'timeout-user',
+      anchor_id: 'anchor_test',
+      direction: 'deposit',
+      asset_code: 'USDC',
+      amount: '100.00',
+    };
+
+    await expect(service.initiateFlow(request)).rejects.toThrow();
+  });
+
+  it('should reject withdrawal initiation with a timeout error when the anchor does not respond', async () => {
+    mockServer.enableTimeoutSimulation(['/sep24/withdraw']);
+
+    const service = new Sep24Service(pool);
+    await service.initialize();
+
+    const request: Sep24InitiateRequest = {
+      user_id: 'timeout-user',
+      anchor_id: 'anchor_test',
+      direction: 'withdrawal',
+      asset_code: 'USDC',
+      amount: '50.00',
+      user_address: 'GAXXX',
+    };
+
+    await expect(service.initiateFlow(request)).rejects.toThrow();
+  });
+
+  it('should handle timeout during transaction status polling gracefully', async () => {
+    const service = new Sep24Service(pool);
+    await service.initialize();
+
+    // Initiate successfully before enabling timeout
+    const request: Sep24InitiateRequest = {
+      user_id: 'poll-timeout-user',
+      anchor_id: 'anchor_test',
+      direction: 'deposit',
+      asset_code: 'USDC',
+      amount: '75.00',
+    };
+    await service.initiateFlow(request);
+
+    // Now make the transaction status endpoint hang
+    mockServer.enableTimeoutSimulation(['/sep24/transaction']);
+
+    // pollAllTransactions should not throw — it must handle the timeout internally
+    await expect(service.pollAllTransactions()).resolves.not.toThrow();
+  });
+
+  it('should report an appropriate error message on timeout, not a generic network error', async () => {
+    mockServer.enableTimeoutSimulation(['/sep24/deposit']);
+
+    const service = new Sep24Service(pool);
+    await service.initialize();
+
+    const request: Sep24InitiateRequest = {
+      user_id: 'error-msg-user',
+      anchor_id: 'anchor_test',
+      direction: 'deposit',
+      asset_code: 'USDC',
+      amount: '200.00',
+    };
+
+    let caughtError: unknown;
+    try {
+      await service.initiateFlow(request);
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeDefined();
+    // The error should be an Error instance with a meaningful message
+    expect(caughtError).toBeInstanceOf(Error);
+    const message = (caughtError as Error).message.toLowerCase();
+    expect(
+      message.includes('timeout') || message.includes('timed out') || message.includes('time') || message.includes('abort') || message.includes('network')
+    ).toBe(true);
   });
 });

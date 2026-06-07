@@ -223,14 +223,15 @@ pub fn do_execute(
     Ok(())
 }
 
-/// Transitions an expired proposal to the Expired state.
+/// Transitions an expired proposal to the Expired state and deletes it from storage.
 ///
 /// Can be called by any address once the proposal TTL has elapsed.
+/// Automatically deletes the proposal to prevent unbounded storage growth.
 pub fn do_expire(
     env: &Env,
     proposal_id: u64,
 ) -> Result<(), ContractError> {
-    let mut proposal = get_proposal(env, proposal_id)?;
+    let proposal = get_proposal(env, proposal_id)?;
 
     if proposal.state != ProposalState::Pending && proposal.state != ProposalState::Approved {
         return Err(ContractError::InvalidProposalState);
@@ -248,9 +249,8 @@ pub fn do_expire(
         }
     }
 
-    proposal.state = ProposalState::Expired;
-    set_proposal(env, &proposal);
-
+    // Auto-delete expired proposal to prevent storage bloat
+    delete_proposal(env, proposal_id);
     emit_proposal_expired(env, proposal_id);
     Ok(())
 }
@@ -315,6 +315,11 @@ pub fn cleanup_expired_proposals(
             if proposal.state == ProposalState::Expired
                 || proposal.state == ProposalState::Executed
             {
+                if let ProposalAction::UpdateFee(_) = &proposal.action {
+                    if get_active_fee_proposal(env) == Some(id) {
+                        set_active_fee_proposal(env, None);
+                    }
+                }
                 delete_proposal(env, id);
                 emit_proposal_cleaned_up(env, id);
             }
@@ -340,11 +345,17 @@ fn dispatch_action(
             emit_fee_updated(env, *bps);
         }
         ProposalAction::RegisterAgent(agent) => {
+            if is_agent_registered(env, agent) {
+                return Err(ContractError::AgentAlreadyRegistered);
+            }
             storage::set_agent_registered(env, agent, true);
             assign_role(env, agent, &Role::Settler);
             emit_agent_registered(env, agent.clone(), executor.clone(), None);
         }
         ProposalAction::RemoveAgent(agent) => {
+            if !is_agent_registered(env, agent) {
+                return Err(ContractError::AgentNotRegistered);
+            }
             storage::set_agent_registered(env, agent, false);
             remove_role(env, agent, &Role::Settler);
             emit_agent_removed(env, agent.clone(), executor.clone());

@@ -1,9 +1,11 @@
 import { Pool } from 'pg';
 import { createLogger } from './correlation-id';
+import { FxRateCache } from './fx-rate-cache';
 
 export class MetricsService {
   private pool: Pool;
   private logger = createLogger('MetricsService');
+  private fxRateCache?: FxRateCache;
 
   // Metrics storage
   private metrics = {
@@ -11,10 +13,46 @@ export class MetricsService {
     swiftremit_webhook_deliveries_total: {} as Record<string, number>,
     swiftremit_active_remittances: 0,
     swiftremit_accumulated_fees: 0,
+    swiftremit_webhook_dead_letter_count: 0,
+    swiftremit_kyc_poll_runs_total: 0,
+    swiftremit_kyc_poll_failures_total: 0,
+    db_pool_available_connections: 0,
+    kyc_poller_last_run_timestamp_seconds: 0,
+    contract_event_indexer_lag_ledgers: 0,
+    swiftremit_rate_limit_exceeded_total: {} as Record<string, number>,
   };
 
-  constructor(pool: Pool) {
+  // FX rate staleness metrics
+  private fxRateAgeSeconds: Map<string, number> = new Map();
+  private fxCacheHitsTotal = 0;
+  private fxCacheMissesTotal = 0;
+
+  constructor(pool: Pool, fxRateCache?: FxRateCache) {
     this.pool = pool;
+    this.fxRateCache = fxRateCache;
+  }
+
+  /** Record a cache hit for a currency pair. */
+  recordFxCacheHit(from: string, to: string): void {
+    this.fxCacheHitsTotal++;
+    // Age is 0 when served from live cache (fresh)
+    const key = `${from.toUpperCase()}_${to.toUpperCase()}`;
+    this.fxRateAgeSeconds.set(key, 0);
+  }
+
+  /** Record a cache miss and the age of the rate that was fetched. */
+  recordFxCacheMiss(from: string, to: string, rateTimestamp: Date): void {
+    this.fxCacheMissesTotal++;
+    const ageSeconds = (Date.now() - rateTimestamp.getTime()) / 1000;
+    const key = `${from.toUpperCase()}_${to.toUpperCase()}`;
+    this.fxRateAgeSeconds.set(key, ageSeconds);
+  }
+
+  /** Update the recorded age for a currency pair (call after each successful fetch). */
+  updateFxRateAge(from: string, to: string, rateTimestamp: Date): void {
+    const ageSeconds = (Date.now() - rateTimestamp.getTime()) / 1000;
+    const key = `${from.toUpperCase()}_${to.toUpperCase()}`;
+    this.fxRateAgeSeconds.set(key, ageSeconds);
   }
 
   /**
@@ -108,10 +146,50 @@ export class MetricsService {
     }
   }
 
+  /** Increment rate-limit-exceeded counter for a given path. */
+  incrementRateLimitExceeded(path: string): void {
+    const key = path || 'unknown';
+    this.metrics.swiftremit_rate_limit_exceeded_total[key] =
+      (this.metrics.swiftremit_rate_limit_exceeded_total[key] ?? 0) + 1;
+  }
+
+  /**
+   * Increment dead-letter counter (called by dispatcher on each DLQ insertion)
+   */
+  incrementDeadLetterCount(): void {
+    this.metrics.swiftremit_webhook_dead_letter_count++;
+  }
+
+  /**
+   * Record that the KYC poller completed a run (call at the end of each poll cycle).
+   */
+  recordKycPollerRun(): void {
+    this.metrics.kyc_poller_last_run_timestamp_seconds = Math.floor(Date.now() / 1000);
+    this.metrics.swiftremit_kyc_poll_runs_total += 1;
+  }
+
+  /**
+   * Record a KYC poll failure.
+   */
+  recordKycPollFailure(): void {
+    this.metrics.swiftremit_kyc_poll_failures_total += 1;
+  }
+
+  /**
+   * Update the contract event indexer lag (ledgers behind the chain tip).
+   * Call this from the Stellar event listener after each poll.
+   */
+  updateContractEventIndexerLag(lagLedgers: number): void {
+    this.metrics.contract_event_indexer_lag_ledgers = lagLedgers;
+  }
+
   /**
    * Update all metrics
    */
   async updateAllMetrics(): Promise<void> {
+    // Pool available connections (totalCount - idleCount gives busy; idleCount = available)
+    this.metrics.db_pool_available_connections = (this.pool as any).idleCount ?? 0;
+
     await Promise.all([
       this.updateSettlementMetrics(),
       this.updateWebhookDeliveryMetrics(),
@@ -150,6 +228,47 @@ export class MetricsService {
     lines.push('# TYPE swiftremit_accumulated_fees gauge');
     lines.push(`swiftremit_accumulated_fees ${this.metrics.swiftremit_accumulated_fees}`);
 
+    // FX rate age gauge (per currency pair)
+    lines.push('# HELP fx_rate_age_seconds Age of the cached FX rate in seconds');
+    lines.push('# TYPE fx_rate_age_seconds gauge');
+    this.fxRateAgeSeconds.forEach((ageSeconds, key) => {
+      const [from, to] = key.split('_');
+      lines.push(`fx_rate_age_seconds{from="${from}",to="${to}"} ${ageSeconds.toFixed(3)}`);
+    });
+
+    // FX cache hit counter
+    lines.push('# HELP fx_rate_cache_hits_total Total number of FX rate cache hits');
+    lines.push('# TYPE fx_rate_cache_hits_total counter');
+    lines.push(`fx_rate_cache_hits_total ${this.fxCacheHitsTotal}`);
+
+    // FX cache miss counter
+    lines.push('# HELP fx_rate_cache_misses_total Total number of FX rate cache misses');
+    lines.push('# TYPE fx_rate_cache_misses_total counter');
+    lines.push(`fx_rate_cache_misses_total ${this.fxCacheMissesTotal}`);
+
+    // DB pool available connections gauge
+    lines.push('# HELP db_pool_available_connections Number of idle (available) connections in the PostgreSQL pool');
+    lines.push('# TYPE db_pool_available_connections gauge');
+    lines.push(`db_pool_available_connections ${this.metrics.db_pool_available_connections}`);
+
+    // KYC poller last run timestamp
+    lines.push('# HELP kyc_poller_last_run_timestamp_seconds Unix timestamp of the last successful KYC poller run');
+    lines.push('# TYPE kyc_poller_last_run_timestamp_seconds gauge');
+    lines.push(`kyc_poller_last_run_timestamp_seconds ${this.metrics.kyc_poller_last_run_timestamp_seconds}`);
+
+    // KYC poller counters
+    lines.push('# HELP swiftremit_kyc_poll_runs_total Total number of KYC poll cycles executed');
+    lines.push('# TYPE swiftremit_kyc_poll_runs_total counter');
+    lines.push(`swiftremit_kyc_poll_runs_total ${this.metrics.swiftremit_kyc_poll_runs_total}`);
+    lines.push('# HELP swiftremit_kyc_poll_failures_total Total number of KYC poll failures');
+    lines.push('# TYPE swiftremit_kyc_poll_failures_total counter');
+    lines.push(`swiftremit_kyc_poll_failures_total ${this.metrics.swiftremit_kyc_poll_failures_total}`);
+
+    // Contract event indexer lag
+    lines.push('# HELP contract_event_indexer_lag_ledgers Number of ledgers the event indexer is behind the chain tip');
+    lines.push('# TYPE contract_event_indexer_lag_ledgers gauge');
+    lines.push(`contract_event_indexer_lag_ledgers ${this.metrics.contract_event_indexer_lag_ledgers}`);
+
     return lines.join('\n') + '\n';
   }
 
@@ -165,9 +284,9 @@ export class MetricsService {
 // Singleton instance
 let metricsServiceInstance: MetricsService | null = null;
 
-export function getMetricsService(pool: Pool): MetricsService {
+export function getMetricsService(pool: Pool, fxRateCache?: FxRateCache): MetricsService {
   if (!metricsServiceInstance) {
-    metricsServiceInstance = new MetricsService(pool);
+    metricsServiceInstance = new MetricsService(pool, fxRateCache);
   }
   return metricsServiceInstance;
 }

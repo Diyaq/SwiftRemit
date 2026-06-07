@@ -32,6 +32,21 @@ name = "settlement_storage"
 harness = false
 required-features = ["benchmarks"]
 
+[[bench]]
+name = "fee_calculation"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "batch_expiry"
+harness = false
+required-features = ["benchmarks"]
+
+[[bench]]
+name = "abuse_protection"
+harness = false
+required-features = ["benchmarks"]
+
 [profile.release]
 opt-level = "z"
 overflow-checks = true
