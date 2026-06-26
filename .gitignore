@@ -19,3 +19,25 @@ backend/node_modules/
 # Test artifacts
 test_snapshots/
 proptest-regressions/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.DS_Store
+
+# Generated / build artifacts
+node_modules/
+dist/
+build/
+*.log
+*.lock
+
+# Local environment overrides
+.env.local
+.env.*.local
+
+# Soroban CLI identity files (contain private keys)
+.soroban-identity/
+identity/
