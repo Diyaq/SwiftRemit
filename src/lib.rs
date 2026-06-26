@@ -90,6 +90,10 @@ mod test_governance_property;
 mod test_dispute;
 #[cfg(test)]
 mod test_features_589_592;
+#[cfg(test)]
+mod test_state_machine_property;
+#[cfg(test)]
+mod test_contract_upgrade;
 #[cfg(all(test, feature = "legacy-tests"))]
 mod test_circuit_breaker;
 
@@ -1890,6 +1894,29 @@ impl SwiftRemitContract {
         require_role_admin(&env, &caller)?;
         circuit_breaker_storage::set_unpause_quorum(&env, quorum);
         Ok(())
+    }
+
+    /// Sets the post-unpause cooldown period in seconds (0 disables cooldown).
+    ///
+    /// During this window after an emergency unpause, per-sender rate limits are
+    /// halved to throttle traffic. Max 7 days. Requires Admin role.
+    pub fn set_cooldown_period(
+        env: Env,
+        caller: Address,
+        seconds: u64,
+    ) -> Result<(), ContractError> {
+        if seconds > 604_800 {
+            return Err(ContractError::InvalidTimelockDuration);
+        }
+        caller.require_auth();
+        require_role_admin(&env, &caller)?;
+        circuit_breaker_storage::set_cooldown_period(&env, seconds);
+        Ok(())
+    }
+
+    /// Returns the current post-unpause cooldown period in seconds.
+    pub fn get_cooldown_period(env: Env) -> u64 {
+        circuit_breaker_storage::get_cooldown_period(&env)
     }
 
     // ── Circuit Breaker View Entry Points ──────────────────────────────────────

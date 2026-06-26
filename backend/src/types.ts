@@ -114,6 +114,9 @@ export interface RemittanceCreatedWebhookPayload {
   fee: string;
   expiry: string;
   memo?: string;
+  platform_fee?: string;
+  protocol_fee?: string;
+  net_amount?: string;
 }
 
 export interface Sep24ExpiredRefundWebhookPayload {

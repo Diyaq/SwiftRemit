@@ -382,6 +382,10 @@ pub struct CircuitBreakerStatus {
     pub unpause_quorum: u32,
     /// Number of votes cast for the current pause instance.
     pub current_vote_count: u32,
+    /// Ledger timestamp of the most recent unpause, or `None` if never unpaused.
+    pub last_unpause_at: Option<u64>,
+    /// Post-unpause cooldown period in seconds; rate limits are halved during this window.
+    pub cooldown_period_seconds: u64,
 }
 
 /// Idempotency record for duplicate remittance prevention.
@@ -424,6 +428,8 @@ pub enum ProposalAction {
     UpdateQuorum(u32),
     /// Update the governance execution timelock in seconds.
     UpdateTimelock(u64),
+    /// Update the post-unpause cooldown period in seconds (0 = disabled).
+    UpdateCooldownPeriod(u64),
 }
 
 /// Lifecycle state of a governance proposal.
