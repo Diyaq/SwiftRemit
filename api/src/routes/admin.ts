@@ -347,5 +347,105 @@ export function createAdminRouter(): Router {
     }
   });
 
+  /**
+   * GET /api/admin/anchors/:id/health
+   * Returns anchor health status, history, and uptime percentage.
+   */
+  router.get('/anchors/:id/health', async (req: Request, res: Response) => {
+    if (!isAdminAuthorized(req)) {
+      return sendError(res, 401, 'Admin authentication required', 'UNAUTHORIZED');
+    }
+
+    const dbUrl = process.env.DATABASE_URL;
+    if (!dbUrl) {
+      return sendError(res, 503, 'Database not configured', 'DB_UNAVAILABLE');
+    }
+
+    const pool = new Pool({ connectionString: dbUrl });
+    try {
+      const { id } = req.params;
+
+      const anchorResult = await pool.query(
+        `SELECT id, name, domain, home_domain, enabled FROM anchors WHERE id = $1`,
+        [id]
+      );
+
+      if (anchorResult.rows.length === 0) {
+        return sendError(res, 404, `Anchor with id '${id}' not found`, 'ANCHOR_NOT_FOUND');
+      }
+
+      const anchor = anchorResult.rows[0];
+
+      const latestResult = await pool.query(
+        `SELECT id, anchor_id, status, response_time_ms, error_message, checked_at
+         FROM anchor_health_history
+         WHERE anchor_id = $1
+         ORDER BY checked_at DESC
+         LIMIT 1`,
+        [id]
+      );
+
+      const historyResult = await pool.query(
+        `SELECT id, anchor_id, status, response_time_ms, error_message, checked_at
+         FROM anchor_health_history
+         WHERE anchor_id = $1
+         ORDER BY checked_at DESC
+         LIMIT 50`,
+        [id]
+      );
+
+      const uptimeResult = await pool.query(
+        `SELECT
+           COUNT(*) as total,
+           SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) as online
+         FROM anchor_health_history
+         WHERE anchor_id = $1 AND checked_at > NOW() - INTERVAL '24 hours'`,
+        [id]
+      );
+
+      const total = parseInt(uptimeResult.rows[0].total, 10);
+      const online = parseInt(uptimeResult.rows[0].online, 10);
+      const uptimePercentage = total > 0 ? Math.round((online / total) * 100 * 100) / 100 : 100;
+
+      const currentStatus = latestResult.rows[0]
+        ? {
+            status: latestResult.rows[0].status,
+            response_time_ms: latestResult.rows[0].response_time_ms,
+            error_message: latestResult.rows[0].error_message,
+            checked_at: latestResult.rows[0].checked_at,
+          }
+        : null;
+
+      const history = historyResult.rows.map(row => ({
+        status: row.status,
+        response_time_ms: row.response_time_ms,
+        error_message: row.error_message,
+        checked_at: row.checked_at,
+      }));
+
+      res.json({
+        success: true,
+        data: {
+          anchor_id: id,
+          anchor_name: anchor.name,
+          domain: anchor.domain,
+          current_status: currentStatus,
+          history,
+          uptime_percentage_24h: uptimePercentage,
+        },
+        timestamp: timestamp(),
+      });
+    } catch (error) {
+      return sendError(
+        res,
+        500,
+        error instanceof Error ? error.message : 'Failed to retrieve anchor health',
+        'ANCHOR_HEALTH_ERROR',
+      );
+    } finally {
+      await pool.end();
+    }
+  });
+
   return router;
 }

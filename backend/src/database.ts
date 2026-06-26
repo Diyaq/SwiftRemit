@@ -890,6 +890,122 @@ export async function purgeExpiredWebhookNonces(): Promise<void> {
   );
 }
 
+// ── Anchor Health History ─────────────────────────────────────────────────────
+
+export interface AnchorHealthRecord {
+  id?: number;
+  anchor_id: string;
+  status: 'online' | 'degraded' | 'offline';
+  response_time_ms?: number;
+  error_message?: string;
+  checked_at?: Date;
+}
+
+export async function saveAnchorHealthCheck(record: AnchorHealthRecord): Promise<void> {
+  await getPool().query(
+    `INSERT INTO anchor_health_history (anchor_id, status, response_time_ms, error_message, checked_at)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [
+      record.anchor_id,
+      record.status,
+      record.response_time_ms ?? null,
+      record.error_message ?? null,
+      record.checked_at ?? new Date(),
+    ]
+  );
+}
+
+export async function getAnchorHealthHistory(
+  anchorId: string,
+  limit: number = 50
+): Promise<AnchorHealthRecord[]> {
+  const result = await getPool().query(
+    `SELECT id, anchor_id, status, response_time_ms, error_message, checked_at
+     FROM anchor_health_history
+     WHERE anchor_id = $1
+     ORDER BY checked_at DESC
+     LIMIT $2`,
+    [anchorId, limit]
+  );
+
+  return result.rows.map(row => ({
+    id: row.id,
+    anchor_id: row.anchor_id,
+    status: row.status,
+    response_time_ms: row.response_time_ms,
+    error_message: row.error_message,
+    checked_at: row.checked_at,
+  }));
+}
+
+export async function getLatestAnchorHealth(
+  anchorId: string
+): Promise<AnchorHealthRecord | null> {
+  const result = await getPool().query(
+    `SELECT id, anchor_id, status, response_time_ms, error_message, checked_at
+     FROM anchor_health_history
+     WHERE anchor_id = $1
+     ORDER BY checked_at DESC
+     LIMIT 1`,
+    [anchorId]
+  );
+
+  if (result.rows.length === 0) return null;
+  const row = result.rows[0];
+  return {
+    id: row.id,
+    anchor_id: row.anchor_id,
+    status: row.status,
+    response_time_ms: row.response_time_ms,
+    error_message: row.error_message,
+    checked_at: row.checked_at,
+  };
+}
+
+export async function getAnchorHealthUptime(
+  anchorId: string,
+  sinceHours: number = 24
+): Promise<number> {
+  const result = await getPool().query(
+    `SELECT
+       COUNT(*) as total,
+       SUM(CASE WHEN status = 'online' THEN 1 ELSE 0 END) as online
+     FROM anchor_health_history
+     WHERE anchor_id = $1 AND checked_at > NOW() - ($2 || ' hours')::INTERVAL`,
+    [anchorId, sinceHours]
+  );
+
+  const total = parseInt(result.rows[0].total, 10);
+  if (total === 0) return 100;
+  const online = parseInt(result.rows[0].online, 10);
+  return Math.round((online / total) * 100 * 100) / 100;
+}
+
+// ── Anchor Listing (shared with API schema) ───────────────────────────────────
+
+export interface AnchorRow {
+  id: string;
+  name: string;
+  domain: string;
+  home_domain: string | null;
+  enabled: boolean;
+}
+
+export async function getEnabledAnchors(): Promise<AnchorRow[]> {
+  const result = await getPool().query(
+    `SELECT id, name, domain, home_domain, enabled
+     FROM anchors
+     WHERE enabled = true`
+  );
+  return result.rows.map(row => ({
+    id: row.id,
+    name: row.name,
+    domain: row.domain,
+    home_domain: row.home_domain,
+    enabled: row.enabled,
+  }));
+}
+
 export async function queryContractEvents(
   filter: ContractEventFilter
 ): Promise<{ events: ContractEvent[]; total: number }> {

@@ -22,6 +22,9 @@ export class MetricsService {
     swiftremit_rate_limit_exceeded_total: {} as Record<string, number>,
   };
 
+  // Anchor availability metrics
+  private anchorAvailability: Map<string, string> = new Map();
+
   // FX rate staleness metrics
   private fxRateAgeSeconds: Map<string, number> = new Map();
   private fxCacheHitsTotal = 0;
@@ -30,6 +33,11 @@ export class MetricsService {
   constructor(pool: Pool, fxRateCache?: FxRateCache) {
     this.pool = pool;
     this.fxRateCache = fxRateCache;
+  }
+
+  /** Record current availability status for an anchor. */
+  recordAnchorAvailability(anchorId: string, status: string): void {
+    this.anchorAvailability.set(anchorId, status);
   }
 
   /** Record a cache hit for a currency pair. */
@@ -238,6 +246,13 @@ export class MetricsService {
     lines.push('# HELP swiftremit_accumulated_fees Total accumulated fees from completed transactions');
     lines.push('# TYPE swiftremit_accumulated_fees gauge');
     lines.push(`swiftremit_accumulated_fees ${this.metrics.swiftremit_accumulated_fees}`);
+
+    // Anchor availability gauge
+    lines.push('# HELP swiftremit_anchor_availability Current availability status of each anchor');
+    lines.push('# TYPE swiftremit_anchor_availability gauge');
+    this.anchorAvailability.forEach((status, anchorId) => {
+      lines.push(`swiftremit_anchor_availability{anchor_id="${this.sanitizeLabelValue(anchorId)}",status="${this.sanitizeLabelValue(status)}"} 1`);
+    });
 
     // FX rate age gauge (per currency pair)
     lines.push('# HELP fx_rate_age_seconds Age of the cached FX rate in seconds');
