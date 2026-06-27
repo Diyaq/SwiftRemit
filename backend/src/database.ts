@@ -11,7 +11,7 @@ import {
   WebhookDelivery,
 } from './types';
 
-let pool: Pool | undefined;
+export let pool: Pool | undefined;
 
 export async function initDatabase() {
   let client: PoolClient | undefined;
@@ -38,22 +38,6 @@ export async function initDatabase() {
         updated_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
 
-      CREATE TABLE IF NOT EXISTS user_kyc_status (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id VARCHAR(255) NOT NULL,
-        anchor_id VARCHAR(255) NOT NULL,
-        kyc_status VARCHAR(20) NOT NULL CHECK (kyc_status IN ('pending', 'approved', 'rejected')),
-        kyc_level VARCHAR(20) CHECK (kyc_level IN ('basic', 'intermediate', 'advanced')),
-        rejection_reason TEXT,
-        verified_at TIMESTAMP NOT NULL,
-        expires_at TIMESTAMP,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        CONSTRAINT uq_user_anchor UNIQUE (user_id, anchor_id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_kyc_status_user_id ON user_kyc_status(user_id);
-      CREATE INDEX IF NOT EXISTS idx_kyc_status_status ON user_kyc_status(kyc_status);
       CREATE TABLE IF NOT EXISTS verified_assets (
         id SERIAL PRIMARY KEY,
         asset_code VARCHAR(12) NOT NULL,
@@ -509,7 +493,7 @@ export interface AnchorPollFailureRecord {
 }
 
 export async function saveAnchorPollFailure(failure: AnchorPollFailureRecord): Promise<void> {
-  await pool.query(
+  await getPool().query(
     `INSERT INTO anchor_poll_failures (anchor_id, error_message, failed_at)
      VALUES ($1, $2, $3)`,
     [failure.anchor_id, failure.error_message, failure.failed_at ?? new Date()]

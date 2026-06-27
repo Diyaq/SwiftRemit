@@ -108,7 +108,7 @@ export function createApp(options: AppOptions = {}): Application {
   const app = express();
   const healthDbPool = process.env.DATABASE_URL
     ? new Pool({ connectionString: process.env.DATABASE_URL, max: 1 })
-    : null;
+    : undefined;
 
   // Security middleware
   app.use(helmet());

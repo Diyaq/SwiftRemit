@@ -66,7 +66,8 @@
       "incomplete": "Les détails de la transaction sont incomplets.",
       "failed": "La transaction a échoué. Veuillez réessayer.",
       "rejected": "La transaction a été rejetée par le portefeuille.",
-      "freighterNotInstalled": "Freighter Wallet n'est pas installé. Veuillez l'installer pour continuer."
+      "freighterNotInstalled": "Freighter Wallet n'est pas installé. Veuillez l'installer pour continuer.",
+      "assetIssuerNotConfigured": "L'actif {{asset}} n'est pas disponible dans cet environnement."
     },
     "limits": {
       "min": "Min : {{value}} {{asset}}",
@@ -83,5 +84,65 @@
     "es": "Español",
     "fr": "Français",
     "pt": "Português"
+  },
+  "kyc": {
+    "loading": "Chargement du KYC...",
+    "statusDetails": "Détails du statut KYC",
+    "overallStatus": "Statut général :",
+    "transferAllowed": "Transfert autorisé :",
+    "transferAllowedYes": "Oui",
+    "transferAllowedNo": "Non",
+    "lastChecked": "Dernière vérification :",
+    "reason": "Raison :",
+    "anchorBreakdown": "Détail par Anchor",
+    "noAnchors": "Aucun enregistrement KYC anchor trouvé.",
+    "anchor": "Anchor :",
+    "status": "Statut :",
+    "kycLevel": "Niveau KYC :",
+    "verifiedAt": "Vérifié le :",
+    "expiresAt": "Expire le :",
+    "noExpiry": "Sans expiration",
+    "checking": "Vérification...",
+    "close": "Fermer",
+    "badgeExpired": "KYC EXPIRÉ — Renouveler maintenant",
+    "errors": {
+      "loadFailed": "Échec du chargement du statut KYC",
+      "unknown": "Erreur KYC inconnue"
+    }
+  },
+  "dispute": {
+    "title": "Résolution des litiges",
+    "openDisputes": "Litiges ouverts",
+    "auditTrail": "Journal d'audit",
+    "loading": "Chargement…",
+    "noDisputes": "Aucun envoi contesté.",
+    "noResolved": "Aucun litige résolu pour l'instant.",
+    "resolving": "Résolution…",
+    "resolved": "Litige résolu on-chain.",
+    "tx": "Tx :",
+    "confirmTitle": "Confirmer la résolution",
+    "confirmMessage": "Résoudre le litige #{{id}} en faveur de {{party}} ?",
+    "senderFunds": "Les fonds seront retournés à l'expéditeur.",
+    "agentFunds": "Les fonds seront libérés à l'agent moins les frais.",
+    "cancel": "Annuler",
+    "confirm": "Confirmer",
+    "favourSender": "Faveur expéditeur",
+    "favourAgent": "Faveur agent",
+    "sender": "Expéditeur",
+    "agent": "Agent",
+    "remittance": "Envoi #{{id}}",
+    "amount": "Montant :",
+    "created": "Créé le :",
+    "evidenceHash": "Hash de preuve :",
+    "resolvedAt": "Résolu le",
+    "inFavourOf": "En faveur de",
+    "resolvedBy": "Résolu par",
+    "prevPage": "← Précédent",
+    "nextPage": "Suivant →",
+    "page": "Page {{page}}",
+    "errors": {
+      "loadFailed": "Échec du chargement des litiges",
+      "resolveFailed": "Échec de la résolution du litige"
+    }
   }
 }

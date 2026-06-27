@@ -66,7 +66,8 @@
       "incomplete": "Transaction details are incomplete.",
       "failed": "Transaction failed. Please try again.",
       "rejected": "Transaction was rejected by the wallet.",
-      "freighterNotInstalled": "Freighter wallet is not installed. Please install it to continue."
+      "freighterNotInstalled": "Freighter wallet is not installed. Please install it to continue.",
+      "assetIssuerNotConfigured": "Asset {{asset}} is not supported in this environment."
     },
     "limits": {
       "min": "Min: {{value}} {{asset}}",
@@ -83,5 +84,65 @@
     "es": "Español",
     "fr": "Français",
     "pt": "Português"
+  },
+  "kyc": {
+    "loading": "Loading KYC...",
+    "statusDetails": "KYC Status Details",
+    "overallStatus": "Overall Status:",
+    "transferAllowed": "Transfer Allowed:",
+    "transferAllowedYes": "Yes",
+    "transferAllowedNo": "No",
+    "lastChecked": "Last Checked:",
+    "reason": "Reason:",
+    "anchorBreakdown": "Anchor Breakdown",
+    "noAnchors": "No anchor KYC records found.",
+    "anchor": "Anchor:",
+    "status": "Status:",
+    "kycLevel": "KYC Level:",
+    "verifiedAt": "Verified At:",
+    "expiresAt": "Expires At:",
+    "noExpiry": "No expiry",
+    "checking": "Checking...",
+    "close": "Close",
+    "badgeExpired": "KYC EXPIRED — Renew Now",
+    "errors": {
+      "loadFailed": "Failed to load KYC status",
+      "unknown": "Unknown KYC error"
+    }
+  },
+  "dispute": {
+    "title": "Dispute Resolution",
+    "openDisputes": "Open Disputes",
+    "auditTrail": "Audit Trail",
+    "loading": "Loading…",
+    "noDisputes": "No disputed remittances.",
+    "noResolved": "No resolved disputes yet.",
+    "resolving": "Resolving…",
+    "resolved": "Dispute resolved on-chain.",
+    "tx": "Tx:",
+    "confirmTitle": "Confirm Resolution",
+    "confirmMessage": "Resolve dispute #{{id}} in favour of {{party}}?",
+    "senderFunds": "Funds will be returned to the sender.",
+    "agentFunds": "Funds will be released to the agent minus fees.",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "favourSender": "Favour Sender",
+    "favourAgent": "Favour Agent",
+    "sender": "Sender",
+    "agent": "Agent",
+    "remittance": "Remittance #{{id}}",
+    "amount": "Amount:",
+    "created": "Created:",
+    "evidenceHash": "Evidence hash:",
+    "resolvedAt": "Resolved At",
+    "inFavourOf": "In Favour Of",
+    "resolvedBy": "Resolved By",
+    "prevPage": "← Prev",
+    "nextPage": "Next →",
+    "page": "Page {{page}}",
+    "errors": {
+      "loadFailed": "Failed to load disputes",
+      "resolveFailed": "Failed to resolve dispute"
+    }
   }
 }
