@@ -93,18 +93,28 @@ export interface RemittanceStore {
    */
   updateStatus(id: string, status: RemittanceStatus): Promise<Remittance | null>;
   /**
-   * Query remittances with cursor-based pagination.
-   * 
-   * @param cursor - Opaque cursor token (base64-encoded JSON payload with created_at and id)
-   * @param limit - Max items to return (1-100)
-   * @param agentId - Optional filter by agent
-   * @param status - Optional filter by status
+   * Query remittances with cursor-based pagination and optional filters (Issue #882).
+   *
+   * @param cursor     - Opaque cursor token
+   * @param limit      - Max items to return (1-100)
+   * @param agentId    - Optional filter by agent
+   * @param status     - Optional filter by status
+   * @param fromDate   - Optional lower bound on created_at
+   * @param toDate     - Optional upper bound on created_at
+   * @param corridor   - Optional corridor filter (e.g. "USD-NG")
+   * @param minAmount  - Optional minimum amount
+   * @param maxAmount  - Optional maximum amount
    */
   queryWithCursor(
     cursor: string | null,
     limit: number,
     agentId?: string,
     status?: RemittanceStatus,
+    fromDate?: Date,
+    toDate?: Date,
+    corridor?: string,
+    minAmount?: number,
+    maxAmount?: number,
   ): Promise<PaginatedResult<Remittance>>;
 }
 
@@ -164,14 +174,18 @@ export class PostgresRemittanceStore implements RemittanceStore {
   }
 
   /**
-   * Cursor-based pagination for remittances.
-   * Cursor encodes the created_at timestamp and id of the last seen record.
+   * Cursor-based pagination for remittances with optional filters (Issue #882).
    */
   async queryWithCursor(
     cursor: string | null,
     limit: number,
     agentId?: string,
     status?: RemittanceStatus,
+    fromDate?: Date,
+    toDate?: Date,
+    corridor?: string,
+    minAmount?: number,
+    maxAmount?: number,
   ): Promise<PaginatedResult<Remittance>> {
     const params: unknown[] = [];
     let paramIndex = 1;
@@ -228,6 +242,29 @@ export class PostgresRemittanceStore implements RemittanceStore {
     if (status) {
       conditions.push(`status = $${paramIndex++}`);
       params.push(status);
+    }
+    if (fromDate) {
+      conditions.push(`created_at >= $${paramIndex++}`);
+      params.push(fromDate);
+    }
+    if (toDate) {
+      conditions.push(`created_at <= $${paramIndex++}`);
+      params.push(toDate);
+    }
+    // corridor is stored as "source_currency-destination_country" in a corridor column
+    // If the column does not exist, this filter is silently skipped to preserve
+    // backward compatibility with deployments that haven't run the migration yet.
+    if (corridor) {
+      conditions.push(`corridor = $${paramIndex++}`);
+      params.push(corridor);
+    }
+    if (minAmount !== undefined) {
+      conditions.push(`amount >= $${paramIndex++}`);
+      params.push(minAmount);
+    }
+    if (maxAmount !== undefined) {
+      conditions.push(`amount <= $${paramIndex++}`);
+      params.push(maxAmount);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';

@@ -1,21 +1,18 @@
 /**
  * GET /api/remittances
  *
- * Query remittances by agent address with cursor-based pagination.
- * Resolves issues #472 and #531.
+ * Query remittances with cursor-based pagination and filtering (Issues #472, #531, #882).
  *
  * Query parameters:
- *   agent  {string}  - Stellar address of the agent (optional)
- *   status {string}  - Filter by status: Pending | Processing | Completed | Cancelled (optional)
- *   cursor {string}  - Opaque pagination cursor from previous response (optional)
- *   limit  {number}  - Items per page, max 100 (default: 20)
- *
- * Response includes:
- *   - data: Array of remittance objects
- *   - next_cursor: Opaque token for fetching the next page (null if no more results)
- *   - has_more: Boolean indicating if more results exist
- *
- * The `memo` field is included in each remittance object when present (issue #538).
+ *   agent       {string}  - Stellar address of the agent (optional)
+ *   status      {string}  - Filter by status (optional)
+ *   from_date   {string}  - ISO date lower bound for created_at (optional)
+ *   to_date     {string}  - ISO date upper bound for created_at (optional)
+ *   corridor    {string}  - Filter by corridor, format "USD-NG" (optional)
+ *   min_amount  {number}  - Minimum amount in stroops (optional)
+ *   max_amount  {number}  - Maximum amount in stroops (optional)
+ *   cursor      {string}  - Opaque pagination cursor from previous response (optional)
+ *   limit       {number}  - Items per page, max 100 (default: 20)
  */
 
 import { Router, Request, Response } from 'express';
@@ -41,6 +38,16 @@ export interface Remittance {
 const VALID_STATUSES: RemittanceStatus[] = ['Pending', 'Processing', 'Completed', 'Cancelled', 'Failed', 'Disputed'];
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
+
+export interface RemittanceFilter {
+  agentId?: string;
+  status?: RemittanceStatus;
+  fromDate?: Date;
+  toDate?: Date;
+  corridor?: string;
+  minAmount?: number;
+  maxAmount?: number;
+}
 
 export type RemittancesRouterOptions = {
   remittanceStore?: RemittanceStore;
@@ -129,7 +136,17 @@ export function createRemittancesRouter(options: RemittancesRouterOptions = {}):
    *               $ref: '#/components/schemas/ErrorResponse'
    */
   router.get('/', async (req: Request, res: Response) => {
-    const { agent, status, cursor, limit: limitStr } = req.query as Record<string, string | undefined>;
+    const {
+      agent,
+      status,
+      cursor,
+      limit: limitStr,
+      from_date,
+      to_date,
+      corridor,
+      min_amount,
+      max_amount,
+    } = req.query as Record<string, string | undefined>;
 
     if (status !== undefined && !VALID_STATUSES.includes(status as RemittanceStatus)) {
       return sendError(
@@ -141,9 +158,41 @@ export function createRemittancesRouter(options: RemittancesRouterOptions = {}):
     }
 
     const limit = limitStr !== undefined ? parseInt(limitStr, 10) : DEFAULT_LIMIT;
-
     if (isNaN(limit) || limit < 1 || limit > MAX_LIMIT) {
       return sendError(res, 400, `\`limit\` must be between 1 and ${MAX_LIMIT}`, 'INVALID_LIMIT');
+    }
+
+    let fromDate: Date | undefined;
+    let toDate: Date | undefined;
+    if (from_date !== undefined) {
+      fromDate = new Date(from_date);
+      if (isNaN(fromDate.getTime())) {
+        return sendError(res, 400, '`from_date` must be a valid ISO 8601 date', 'INVALID_DATE');
+      }
+    }
+    if (to_date !== undefined) {
+      toDate = new Date(to_date);
+      if (isNaN(toDate.getTime())) {
+        return sendError(res, 400, '`to_date` must be a valid ISO 8601 date', 'INVALID_DATE');
+      }
+    }
+
+    let minAmount: number | undefined;
+    let maxAmount: number | undefined;
+    if (min_amount !== undefined) {
+      minAmount = Number(min_amount);
+      if (!Number.isFinite(minAmount) || minAmount < 0) {
+        return sendError(res, 400, '`min_amount` must be a non-negative number', 'INVALID_AMOUNT');
+      }
+    }
+    if (max_amount !== undefined) {
+      maxAmount = Number(max_amount);
+      if (!Number.isFinite(maxAmount) || maxAmount < 0) {
+        return sendError(res, 400, '`max_amount` must be a non-negative number', 'INVALID_AMOUNT');
+      }
+    }
+    if (minAmount !== undefined && maxAmount !== undefined && minAmount > maxAmount) {
+      return sendError(res, 400, '`min_amount` must not exceed `max_amount`', 'INVALID_AMOUNT_RANGE');
     }
 
     if (!remittanceStore) {
@@ -156,6 +205,11 @@ export function createRemittancesRouter(options: RemittancesRouterOptions = {}):
         limit,
         agent?.trim(),
         status as RemittanceStatus | undefined,
+        fromDate,
+        toDate,
+        corridor?.trim(),
+        minAmount,
+        maxAmount,
       );
 
       return res.json({

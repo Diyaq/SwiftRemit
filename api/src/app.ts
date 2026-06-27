@@ -1,6 +1,8 @@
 import express, { Application, Request, Response, NextFunction } from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import rateLimit from 'express-rate-limit';
 import { Pool } from 'pg';
 import http from 'http';
 import https from 'https';
@@ -13,6 +15,8 @@ import settlementsRouter from './routes/settlements';
 import { createRemittancesRouter, RemittancesRouterOptions } from './routes/remittances';
 import { createAdminRouter } from './routes/admin';
 import { createAnalyticsRouter } from './routes/analytics';
+import { createAgentsRouter } from './routes/agents';
+import { createAuthRouter } from './routes/auth';
 import { ErrorResponse } from './types';
 import { AnchorStore } from './db/anchorStore';
 import { Server as SocketIOServer } from 'socket.io';
@@ -114,6 +118,7 @@ export function createApp(options: AppOptions = {}): Application {
   app.use(helmet());
   app.use(cors());
   app.use(express.json());
+  app.use(cookieParser());
 
   // Rate limiting with RFC 6585 headers
   const limiter = createRateLimitMiddleware();
@@ -174,6 +179,12 @@ export function createApp(options: AppOptions = {}): Application {
 
   // API documentation
   app.use('/api/docs', docsRouter);
+
+  // Auth — JWT login / refresh / logout (Issue #883)
+  app.use('/api/auth', createAuthRouter());
+
+  // Agents — registration and management (Issue #880)
+  app.use('/api/agents', createAgentsRouter());
 
   // WebSocket health endpoint (development only — guarded inside the router)
   if (options.io) {
