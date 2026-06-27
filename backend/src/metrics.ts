@@ -127,9 +127,9 @@ export class MetricsService {
     }
   }
 
-  /**
-   * Update accumulated fees gauge
-   */
+/**
+    * Update accumulated fees gauge
+    */
   async updateAccumulatedFees(): Promise<void> {
     try {
       const result = await this.pool.query(
@@ -145,6 +145,25 @@ export class MetricsService {
       });
     } catch (error) {
       this.logger.error('Failed to update accumulated fees', error);
+    }
+  }
+
+  /**
+   * Update dead-letter queue count from the database
+   */
+  async updateDeadLetterCount(): Promise<void> {
+    try {
+      const result = await this.pool.query(
+        `SELECT COUNT(*) as count FROM webhook_dead_letters WHERE replayed_at IS NULL`
+      );
+
+      this.metrics.swiftremit_webhook_dead_letter_count = parseInt(result.rows[0].count);
+
+      this.logger.debug('Dead-letter count updated', {
+        count: this.metrics.swiftremit_webhook_dead_letter_count,
+      });
+    } catch (error) {
+      this.logger.error('Failed to update dead-letter count', error);
     }
   }
 
@@ -185,9 +204,9 @@ export class MetricsService {
     this.metrics.contract_event_indexer_lag_ledgers = lagLedgers;
   }
 
-  /**
-   * Update all metrics
-   */
+/**
+    * Update all metrics
+    */
   async updateAllMetrics(): Promise<void> {
     const p = this.pool as any;
     this.metrics.db_pool_idle_connections = p.idleCount ?? 0;
@@ -199,6 +218,7 @@ export class MetricsService {
       this.updateWebhookDeliveryMetrics(),
       this.updateActiveRemittances(),
       this.updateAccumulatedFees(),
+      this.updateDeadLetterCount(),
     ]);
   }
 
@@ -291,6 +311,18 @@ export class MetricsService {
     lines.push('# HELP contract_event_indexer_lag_ledgers Number of ledgers the event indexer is behind the chain tip');
     lines.push('# TYPE contract_event_indexer_lag_ledgers gauge');
     lines.push(`contract_event_indexer_lag_ledgers ${this.metrics.contract_event_indexer_lag_ledgers}`);
+
+    // Dead-letter queue count
+    lines.push('# HELP swiftremit_webhook_dead_letter_count Total number of webhook deliveries in the dead-letter queue');
+    lines.push('# TYPE swiftremit_webhook_dead_letter_count gauge');
+    lines.push(`swiftremit_webhook_dead_letter_count ${this.metrics.swiftremit_webhook_dead_letter_count}`);
+
+    // Rate limit exceeded counter
+    lines.push('# HELP swiftremit_rate_limit_exceeded_total Total number of rate limit exceeded events by path');
+    lines.push('# TYPE swiftremit_rate_limit_exceeded_total counter');
+    Object.entries(this.metrics.swiftremit_rate_limit_exceeded_total).forEach(([path, count]) => {
+      lines.push(`swiftremit_rate_limit_exceeded_total{path="${this.sanitizeLabelValue(path)}"} ${count}`);
+    });
 
     return lines.join('\n') + '\n';
   }

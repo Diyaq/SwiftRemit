@@ -5,6 +5,46 @@
 //! Uses both instance storage (contract-level config) and persistent storage
 //! (per-entity data).
 
+// ============================================================================
+// Architecture: Storage Tiers
+// ============================================================================
+//
+// The SwiftRemit contract employs a tiered storage strategy to optimize for
+// Soroban's ledger entry limits and minimize storage operations:
+//
+// ## Tier 1: Instance Storage (Hot Tier)
+// - Contains contract-level configuration and small scalars
+// - Accessed frequently for every operation (fee rates, token address, counters)
+// - Limited to ~50 entries total per contract
+// - Examples: Admin, UsdcToken, PlatformFeeBps, RemittanceCounter, AccumulatedFees
+// - Use: `env.storage().instance().get/set()`
+//
+// ## Tier 2: Persistent Storage - Short-lived Entities
+// - Remittances, settlements, and transfers with bounded lifetime
+// - TTL managed via ledger extensions (valid for hours to days)
+// - High cardinality but time-bounded access patterns
+// - Examples: Remittance(u64), TransferState(u64), DisbursedAmount(u64)
+// - Use: `env.storage().persistent().get/set()`
+//
+// ## Tier 3: Persistent Storage - Long-lived Metadata
+// - User preferences, agent records, and configuration that persists
+// - Accessed infrequently, no TTL expiration
+// - Lower cardinality but permanent storage
+// - Examples: AgentRegistered(Address), UserBlacklisted(Address), FeeCorridor(from, to)
+//
+// ## Migration Strategy
+// - Schema changes use migration keys (MigrationInProgress)
+// - Old keys migrated to new formats during contract upgrades
+// - SettlementPacked replaces scattered settlement flags
+// - See migration.rs for upgrade paths
+//
+// ## Design Principles
+// - Hot path optimization: Fee parameters and counters in instance storage
+// - Avoid redundant reads: packed structs for compound operations
+// - TTL-aware: Processing remittances extended during state changes
+// - Idempotent writes: Skip if value unchanged to save ledger entries
+// ============================================================================
+
 use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::{AgentStats, ContractError, DailyLimit, Remittance, SenderVolumeEntry, TransferRecord};
