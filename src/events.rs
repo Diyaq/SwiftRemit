@@ -103,9 +103,23 @@ pub fn emit_admin_removed(env: &Env, caller: Address, removed_admin: Address) {
     emit_event!(env, "admin", "removed", caller, removed_admin);
 }
 
+/// Emits an event when an admin nominates a new admin (#842).
+pub fn emit_admin_nominated(env: &Env, nominator: Address, nominee: Address) {
+    emit_event!(env, "admin", "nominated", nominator, nominee);
+}
+
+/// Emits an event when admin key rotation completes: old admin removed, new admin confirmed (#842).
+pub fn emit_admin_rotated(env: &Env, old_admin: Address, new_admin: Address) {
+    emit_event!(env, "admin", "rotated", old_admin, new_admin);
+}
+
 // ── Remittance Events ──────────────────────────────────────────────
 
 /// Emits an event when a new remittance is created.
+///
+/// Includes the full fee breakdown so downstream analytics and the SDK can
+/// distinguish platform fee, protocol fee, and net payout amount without
+/// re-deriving them from on-chain config.
 pub fn emit_remittance_created(
     env: &Env,
     remittance_id: u64,
@@ -114,8 +128,16 @@ pub fn emit_remittance_created(
     amount: i128,
     fee: i128,
     integrator_fee: i128,
+    platform_fee: i128,
+    protocol_fee: i128,
+    net_amount: i128,
 ) {
-    emit_event!(env, "remit", "created", remittance_id, sender, agent, amount, fee, integrator_fee);
+    emit_event!(
+        env, "remit", "created",
+        remittance_id, sender, agent,
+        amount, fee, integrator_fee,
+        platform_fee, protocol_fee, net_amount
+    );
 }
 
 /// Emits an event when a remittance payout is completed.
@@ -253,11 +275,26 @@ pub fn emit_remittance_failed(env: &Env, id: u64, agent: Address) {
     env.events().publish((Symbol::new(env, "remittance_failed"), id), agent);
 }
 
-pub fn emit_partial_payout(env: &Env, remittance_id: u64, agent: Address, amount: i128, disbursed_total: i128) {
+pub fn emit_partial_payout(env: &Env, remittance_id: u64, agent: Address, amount: i128, disbursed_total: i128, remaining_amount: i128) {
     env.events().publish(
         (Symbol::new(env, "partial_payout"), remittance_id),
-        (agent, amount, disbursed_total),
+        (agent, amount, disbursed_total, remaining_amount),
     );
+}
+
+/// Emits an event when a pending remittance is expired by any caller after its expiry window.
+///
+/// Topics: `("remit", "expired")`
+/// Payload: `(schema_version, ledger_seq, ledger_ts, remittance_id, sender, token, refund_amount, expires_at)`
+pub fn emit_remittance_expired(
+    env: &Env,
+    remittance_id: u64,
+    sender: Address,
+    token: Address,
+    refund_amount: i128,
+    expires_at: u64,
+) {
+    emit_event!(env, "remit", "expired", remittance_id, sender, token, refund_amount, expires_at);
 }
 
 pub fn emit_agent_cap_set(env: &Env, agent: Address, cap: i128, caller: Address) {
@@ -512,6 +549,26 @@ pub fn emit_proposal_cleaned_up(env: &Env, proposal_id: u64) {
         (Symbol::new(env, "gov"), Symbol::new(env, "cleaned_up")),
         (SCHEMA_VERSION, proposal_id),
     );
+}
+
+/// Emits when an agent's reputation score falls below the minimum threshold (#833).
+/// Fired during the reputation gate check in `create_remittance`.
+pub fn emit_agent_suspended(env: &Env, agent: Address, reputation: u32, min_threshold: u32) {
+    emit_event!(env, "agent", "suspnded", agent, reputation, min_threshold);
+}
+
+/// Emits when an agent's reputation score drops below the minimum threshold (#833).
+///
+/// Fired at the point of the failed eligibility check inside `create_remittance`
+/// so off-chain systems can detect and flag low-reputation agents automatically.
+///
+/// # Topics
+/// `("agent", "suspended")`
+///
+/// # Payload
+/// `(schema_version, ledger_sequence, ledger_timestamp, agent, reputation_score, min_threshold)`
+pub fn emit_agent_suspended(env: &Env, agent: Address, reputation: u32, min_threshold: u32) {
+    emit_event!(env, "agent", "suspnded", agent, reputation, min_threshold);
 }
 
 /// Emits when a cross-contract migration is aborted and state is reset to Idle.
