@@ -73,7 +73,11 @@ Thumbs.db
 
 # Generated / build artifacts
 node_modules/
+api/node_modules/
+sdk/node_modules/
+examples/node_modules/
 dist/
+out/
 build/
 *.log
 *.lock
