@@ -20,24 +20,34 @@ backend/node_modules/
 test_snapshots/
 proptest-regressions/
 
-# IDE and editor files
+# Editor / IDE
+.vscode/
 .idea/
 *.swp
 *.swo
 *~
+*.DS_Store
 
 # OS metadata
-.DS_Store
 Thumbs.db
+
+# Generated / build artifacts
+node_modules/
+dist/
+build/
+*.log
+*.lock
+*.tmp
+*.bak
 
 # Coverage output
 backend/coverage/
 frontend/coverage/
 
-# Local env overrides (beyond .env)
+# Local environment overrides
 .env.local
 .env.*.local
 
-# Scratch / temp files
-*.tmp
-*.bak
+# Soroban CLI identity files (contain private keys)
+.soroban-identity/
+identity/

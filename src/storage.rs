@@ -253,6 +253,15 @@ enum DataKey {
     // === Abuse Protection ===
     AbuseCooldownDecayRateBps,
 
+    // === Corridor Volume Limits (#839) ===
+    /// Daily volume cap for a corridor indexed by (from_country, to_country)
+    CorridorCap(soroban_sdk::String, soroban_sdk::String),
+    /// Rolling daily volume for a corridor: (from_country, to_country) -> (window_start, volume)
+    CorridorVolume(soroban_sdk::String, soroban_sdk::String),
+
+    // === Admin Key Rotation (#842) ===
+    /// Nominated new admin address and the expiry timestamp of the nomination
+    NominatedAdmin,
 }
 
 /// Checks if the contract has an admin configured.
@@ -1497,6 +1506,13 @@ pub fn remove_idempotency_record(env: &Env, key: &String) {
         .remove(&DataKey::IdempotencyRecord(key.clone()));
 }
 
+/// Gets an idempotency record without TTL filtering (used for cleanup).
+pub fn get_idempotency_record_raw(env: &Env, key: &String) -> Option<crate::IdempotencyRecord> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::IdempotencyRecord(key.clone()))
+}
+
 /// Gets the runtime max expired batch size (falls back to compile-time constant).
 pub fn get_max_expired_batch_size(env: &Env) -> u32 {
     env.storage()
@@ -2080,6 +2096,115 @@ pub fn extend_remittance_ttl(env: &Env, remittance_id: u64, ledgers: u32) {
     if env.storage().persistent().has(&key) {
         env.storage().persistent().extend_ttl(&key, ledgers, ledgers);
     }
+}
+
+// ── Corridor Volume Limits (#839) ────────────────────────────────────────────
+
+/// Window for corridor rolling volume resets (same as daily limit window).
+pub const CORRIDOR_VOLUME_WINDOW_SECONDS: u64 = crate::config::DAILY_LIMIT_WINDOW_SECONDS;
+
+/// Packed record stored per corridor: tracks the rolling window start and accumulated volume.
+#[soroban_sdk::contracttype]
+#[derive(Clone)]
+pub struct CorridorVolumeRecord {
+    pub window_start: u64,
+    pub volume: i128,
+}
+
+/// Returns the current corridor daily cap (0 = no cap configured).
+pub fn get_corridor_cap(env: &Env, from_country: &String, to_country: &String) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::CorridorCap(from_country.clone(), to_country.clone()))
+        .unwrap_or(0)
+}
+
+/// Sets the daily volume cap for a corridor (admin only, enforced at call site).
+pub fn set_corridor_cap(env: &Env, from_country: &String, to_country: &String, cap: i128) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::CorridorCap(from_country.clone(), to_country.clone()), &cap);
+}
+
+/// Checks that adding `amount` to the corridor's rolling volume does not exceed
+/// the cap, then records the amount. Returns `DailySendLimitExceeded` if the cap
+/// would be breached; returns `Ok(())` when no cap is configured.
+pub fn check_and_increment_corridor_volume(
+    env: &Env,
+    from_country: &String,
+    to_country: &String,
+    amount: i128,
+) -> Result<(), ContractError> {
+    let cap = get_corridor_cap(env, from_country, to_country);
+    if cap == 0 {
+        return Ok(()); // No cap configured for this corridor
+    }
+
+    let now = env.ledger().timestamp();
+    let key = DataKey::CorridorVolume(from_country.clone(), to_country.clone());
+
+    let record: CorridorVolumeRecord = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(CorridorVolumeRecord { window_start: now, volume: 0 });
+
+    // If the record belongs to a previous window, reset it
+    let (window_start, current_volume) =
+        if now.saturating_sub(record.window_start) >= CORRIDOR_VOLUME_WINDOW_SECONDS {
+            (now, 0i128)
+        } else {
+            (record.window_start, record.volume)
+        };
+
+    let new_volume = current_volume
+        .checked_add(amount)
+        .ok_or(ContractError::Overflow)?;
+
+    if new_volume > cap {
+        return Err(ContractError::CorridorVolumeLimitExceeded);
+    }
+
+    env.storage()
+        .persistent()
+        .set(&key, &CorridorVolumeRecord { window_start, volume: new_volume });
+
+    Ok(())
+}
+
+// ── Admin Key Rotation (#842) ─────────────────────────────────────────────────
+
+/// 48-hour nomination expiry in seconds.
+pub const ADMIN_NOMINATION_EXPIRY_SECONDS: u64 = 48 * 3600;
+
+/// Packed record for an admin nomination: proposed address + expiry timestamp.
+#[soroban_sdk::contracttype]
+#[derive(Clone)]
+pub struct AdminNomination {
+    pub nominee: Address,
+    pub expires_at: u64,
+    pub nominator: Address,
+}
+
+/// Returns the current admin nomination, if any.
+pub fn get_admin_nomination(env: &Env) -> Option<AdminNomination> {
+    env.storage()
+        .instance()
+        .get(&DataKey::NominatedAdmin)
+}
+
+/// Stores an admin nomination.
+pub fn set_admin_nomination(env: &Env, nomination: &AdminNomination) {
+    env.storage()
+        .instance()
+        .set(&DataKey::NominatedAdmin, nomination);
+}
+
+/// Clears the admin nomination.
+pub fn clear_admin_nomination(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&DataKey::NominatedAdmin);
 }
 
 // === Abuse Cooldown Decay Rate ===

@@ -103,6 +103,16 @@ pub fn emit_admin_removed(env: &Env, caller: Address, removed_admin: Address) {
     emit_event!(env, "admin", "removed", caller, removed_admin);
 }
 
+/// Emits an event when an admin nominates a new admin (#842).
+pub fn emit_admin_nominated(env: &Env, nominator: Address, nominee: Address) {
+    emit_event!(env, "admin", "nominated", nominator, nominee);
+}
+
+/// Emits an event when admin key rotation completes: old admin removed, new admin confirmed (#842).
+pub fn emit_admin_rotated(env: &Env, old_admin: Address, new_admin: Address) {
+    emit_event!(env, "admin", "rotated", old_admin, new_admin);
+}
+
 // ── Remittance Events ──────────────────────────────────────────────
 
 /// Emits an event when a new remittance is created.

@@ -392,6 +392,8 @@ pub struct IdempotencyRecord {
     pub request_hash: soroban_sdk::BytesN<32>,
     /// The remittance ID returned from the original request
     pub remittance_id: u64,
+    /// Ledger timestamp when this record was created
+    pub created_at: u64,
     /// Timestamp when this record expires (ledger timestamp)
     pub expires_at: u64,
 }

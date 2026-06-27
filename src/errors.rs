@@ -332,4 +332,13 @@ pub enum ContractError {
 
     /// Agent reputation is below the minimum threshold.
     BelowMinReputation = 79,
+
+    /// Corridor daily volume cap has been reached.
+    CorridorVolumeLimitExceeded = 80,
+
+    /// Admin nomination has expired (48-hour window elapsed).
+    NominationExpired = 81,
+
+    /// No active admin nomination exists.
+    NominationNotFound = 82,
 }

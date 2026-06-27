@@ -462,6 +462,16 @@ impl SwiftRemitContract {
         let default_country = String::from_str(&env, DEFAULT_DAILY_LIMIT_COUNTRY);
         enforce_daily_send_limit(&env, &sender, &default_currency, &default_country, amount)?;
 
+        // #839: Check and increment corridor volume against the admin-configured cap.
+        // Both from/to default to "GLOBAL" so the cap covers all traffic when no
+        // corridor-specific routing is provided.
+        storage::check_and_increment_corridor_volume(
+            &env,
+            &default_currency,
+            &default_country,
+            amount,
+        )?;
+
         // Validate settlement config
         if let Some(ref config) = settlement_config {
             if config.require_proof && config.oracle_address.is_none() {
@@ -547,6 +557,7 @@ impl SwiftRemitContract {
                 key: key.clone(),
                 request_hash,
                 remittance_id,
+                created_at: env.ledger().timestamp(),
                 expires_at,
             };
             storage::set_idempotency_record(&env, &key, &record);
@@ -696,7 +707,10 @@ impl SwiftRemitContract {
         // Create all remittances
         let mut remittance_ids = Vec::new(&env);
         let mut counter = get_remittance_counter(&env)?;
-        let prior_volume = storage::get_sender_rolling_volume(&env, &sender, env.ledger().timestamp());
+        // #840: Cache timestamp and prior volume once before the loop to avoid
+        // redundant ledger reads on every iteration.
+        let now = env.ledger().timestamp();
+        let prior_volume = storage::get_sender_rolling_volume(&env, &sender, now);
         let mut cumulative_volume = prior_volume;
 
         for i in 0..batch_size {
@@ -726,7 +740,7 @@ impl SwiftRemitContract {
                 expiry: entry.expiry,
                 settlement_config: crate::MaybeSettlementConfig::None,
                 token: usdc_token.clone(),
-                created_at: env.ledger().timestamp(),
+                created_at: now,
                 failed_at: None,
                 dispute_evidence: None.into(),
             };
@@ -738,7 +752,7 @@ impl SwiftRemitContract {
             set_transfer_state(&env, remittance_id, RemittanceStatus::Pending)?;
 
             // Persist the sender's volume history for future discount calculations.
-            storage::record_sender_volume(&env, &sender, entry.amount, env.ledger().timestamp())?;
+            storage::record_sender_volume(&env, &sender, entry.amount, now)?;
 
             // Index this remittance under the sender and agent for paginated queries
             storage::append_sender_remittance(&env, &sender, remittance_id);
@@ -3326,6 +3340,129 @@ impl SwiftRemitContract {
     ) -> Result<(), ContractError> {
         caller.require_auth();
         governance::cleanup_expired_proposals(&env, &caller, proposal_ids)
+    }
+
+    // ── #839: Corridor Volume Cap ──────────────────────────────────────────────
+
+    /// Sets the maximum daily USDC volume for a corridor (admin only).
+    ///
+    /// Once the corridor's rolling 24-hour volume reaches `cap`, new remittances
+    /// that would exceed the limit are rejected with `CorridorVolumeLimitExceeded`.
+    /// Set `cap` to 0 to disable the cap for that corridor.
+    pub fn set_corridor_cap(
+        env: Env,
+        caller: Address,
+        from_country: String,
+        to_country: String,
+        cap: i128,
+    ) -> Result<(), ContractError> {
+        storage::require_admin(&env, &caller)?;
+        storage::set_corridor_cap(&env, &from_country, &to_country, cap);
+        Ok(())
+    }
+
+    /// Returns the daily volume cap for a corridor (0 = no cap).
+    pub fn get_corridor_cap(
+        env: Env,
+        from_country: String,
+        to_country: String,
+    ) -> i128 {
+        storage::get_corridor_cap(&env, &from_country, &to_country)
+    }
+
+    // ── #841: Idempotency Key Cleanup ─────────────────────────────────────────
+
+    /// Removes expired idempotency records to free persistent storage (admin only).
+    ///
+    /// A record is expired when `current_time >= record.expires_at`.
+    /// Callers supply the list of keys to inspect; the function only removes
+    /// those that have actually expired, leaving live records untouched.
+    pub fn cleanup_expired_idempotency_keys(
+        env: Env,
+        caller: Address,
+        keys: soroban_sdk::Vec<String>,
+    ) -> Result<u32, ContractError> {
+        storage::require_admin(&env, &caller)?;
+        let now = env.ledger().timestamp();
+        let mut removed: u32 = 0;
+        for i in 0..keys.len() {
+            let key = keys.get_unchecked(i);
+            if let Some(rec) = storage::get_idempotency_record_raw(&env, &key) {
+                if now >= rec.expires_at {
+                    storage::remove_idempotency_record(&env, &key);
+                    removed = removed.checked_add(1).ok_or(ContractError::Overflow)?;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    // ── #842: Admin Key Rotation ───────────────────────────────────────────────
+
+    /// Proposes a new admin address (two-phase rotation, phase 1).
+    ///
+    /// The calling address must be a current admin. The nomination expires after
+    /// 48 hours. Only one nomination may be active at a time; calling again
+    /// overwrites the previous nomination.
+    pub fn nominate_admin(
+        env: Env,
+        caller: Address,
+        nominee: Address,
+    ) -> Result<(), ContractError> {
+        storage::require_admin(&env, &caller)?;
+        let expires_at = env
+            .ledger()
+            .timestamp()
+            .checked_add(storage::ADMIN_NOMINATION_EXPIRY_SECONDS)
+            .ok_or(ContractError::Overflow)?;
+        let nomination = storage::AdminNomination {
+            nominee: nominee.clone(),
+            expires_at,
+            nominator: caller.clone(),
+        };
+        storage::set_admin_nomination(&env, &nomination);
+        events::emit_admin_nominated(&env, caller, nominee);
+        Ok(())
+    }
+
+    /// Accepts an active nomination, completing the admin key rotation (phase 2).
+    ///
+    /// The caller must be the nominated address. The old (nominator) admin is
+    /// automatically removed. Emits `admin_rotated`.
+    pub fn confirm_admin_nomination(env: Env, caller: Address) -> Result<(), ContractError> {
+        caller.require_auth();
+        let nomination = storage::get_admin_nomination(&env)
+            .ok_or(ContractError::NominationNotFound)?;
+
+        if caller != nomination.nominee {
+            return Err(ContractError::Unauthorized);
+        }
+
+        let now = env.ledger().timestamp();
+        if now > nomination.expires_at {
+            storage::clear_admin_nomination(&env);
+            return Err(ContractError::NominationExpired);
+        }
+
+        let old_admin = nomination.nominator.clone();
+
+        // Add the new admin
+        storage::set_admin_role(&env, &caller, true);
+        storage::add_admin_to_list(&env, &caller);
+        let count = storage::get_admin_count(&env)
+            .checked_add(1)
+            .ok_or(ContractError::Overflow)?;
+        storage::set_admin_count(&env, count);
+
+        // Remove the old admin (rotated out)
+        storage::set_admin_role(&env, &old_admin, false);
+        storage::remove_admin_from_list(&env, &old_admin);
+        let count = storage::get_admin_count(&env).saturating_sub(1).max(1);
+        storage::set_admin_count(&env, count);
+
+        storage::clear_admin_nomination(&env);
+        events::emit_admin_rotated(&env, old_admin, caller);
+        Ok(())
     }
 
     /// Aborts an in-progress cross-contract migration and resets the state machine to Idle.
