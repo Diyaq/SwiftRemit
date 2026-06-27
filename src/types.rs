@@ -124,16 +124,6 @@ pub struct SettlementConfig {
 }
 
 /// Contracttype-compatible wrapper for Option<SettlementConfig>.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MaybeSettlementConfig {
-    None,
-    Some(SettlementConfig),
-}
-impl From<Option<SettlementConfig>> for MaybeSettlementConfig {
-    fn from(o: Option<SettlementConfig>) -> Self { match o { None => Self::None, Some(v) => Self::Some(v) } }
-}
-
 /// Escrow status for locked funds
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,6 +219,8 @@ pub struct Remittance {
     pub failed_at: Option<u64>,
     /// Hash of evidence provided by the sender during a dispute
     pub dispute_evidence: MaybeBytes32,
+    /// Ledger timestamp after which anyone can call expire_remittance to refund the sender
+    pub expires_at: Option<u64>,
 }
 
 #[contracttype]
@@ -382,6 +374,10 @@ pub struct CircuitBreakerStatus {
     pub unpause_quorum: u32,
     /// Number of votes cast for the current pause instance.
     pub current_vote_count: u32,
+    /// Ledger timestamp of the most recent unpause, or `None` if never unpaused.
+    pub last_unpause_at: Option<u64>,
+    /// Post-unpause cooldown period in seconds; rate limits are halved during this window.
+    pub cooldown_period_seconds: u64,
 }
 
 /// Idempotency record for duplicate remittance prevention.
@@ -398,6 +394,8 @@ pub struct IdempotencyRecord {
     pub request_hash: soroban_sdk::BytesN<32>,
     /// The remittance ID returned from the original request
     pub remittance_id: u64,
+    /// Ledger timestamp when this record was created
+    pub created_at: u64,
     /// Timestamp when this record expires (ledger timestamp)
     pub expires_at: u64,
 }
@@ -424,6 +422,8 @@ pub enum ProposalAction {
     UpdateQuorum(u32),
     /// Update the governance execution timelock in seconds.
     UpdateTimelock(u64),
+    /// Update the post-unpause cooldown period in seconds (0 = disabled).
+    UpdateCooldownPeriod(u64),
     /// Add the given token address to the asset allowlist (#832).
     /// Enables remittances denominated in that Stellar-native asset.
     WhitelistAsset(Address),
@@ -477,4 +477,25 @@ pub struct Proposal {
     pub approval_count: u32,
     /// Ledger timestamp when quorum was reached (set on Approved transition).
     pub approval_timestamp: Option<u64>,
+    /// Ledger timestamp before which the proposal cannot be executed (timelock enforced).
+    pub execute_after: Option<u64>,
+}
+
+/// Record of a single partial payout disbursement for a remittance.
+///
+/// Stored per remittance to enable cumulative payout state reconstruction
+/// without additional on-chain queries.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PartialPayoutRecord {
+    /// Amount disbursed in this payout
+    pub amount: i128,
+    /// Cumulative total disbursed (including this payout)
+    pub total_disbursed: i128,
+    /// Remaining amount left to disburse (net_payout - total_disbursed)
+    pub remaining_amount: i128,
+    /// Ledger timestamp when this disbursement occurred
+    pub timestamp: u64,
+    /// Ledger sequence when this disbursement occurred
+    pub ledger_sequence: u32,
 }

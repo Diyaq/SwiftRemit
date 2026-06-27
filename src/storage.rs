@@ -5,6 +5,46 @@
 //! Uses both instance storage (contract-level config) and persistent storage
 //! (per-entity data).
 
+// ============================================================================
+// Architecture: Storage Tiers
+// ============================================================================
+//
+// The SwiftRemit contract employs a tiered storage strategy to optimize for
+// Soroban's ledger entry limits and minimize storage operations:
+//
+// ## Tier 1: Instance Storage (Hot Tier)
+// - Contains contract-level configuration and small scalars
+// - Accessed frequently for every operation (fee rates, token address, counters)
+// - Limited to ~50 entries total per contract
+// - Examples: Admin, UsdcToken, PlatformFeeBps, RemittanceCounter, AccumulatedFees
+// - Use: `env.storage().instance().get/set()`
+//
+// ## Tier 2: Persistent Storage - Short-lived Entities
+// - Remittances, settlements, and transfers with bounded lifetime
+// - TTL managed via ledger extensions (valid for hours to days)
+// - High cardinality but time-bounded access patterns
+// - Examples: Remittance(u64), TransferState(u64), DisbursedAmount(u64)
+// - Use: `env.storage().persistent().get/set()`
+//
+// ## Tier 3: Persistent Storage - Long-lived Metadata
+// - User preferences, agent records, and configuration that persists
+// - Accessed infrequently, no TTL expiration
+// - Lower cardinality but permanent storage
+// - Examples: AgentRegistered(Address), UserBlacklisted(Address), FeeCorridor(from, to)
+//
+// ## Migration Strategy
+// - Schema changes use migration keys (MigrationInProgress)
+// - Old keys migrated to new formats during contract upgrades
+// - SettlementPacked replaces scattered settlement flags
+// - See migration.rs for upgrade paths
+//
+// ## Design Principles
+// - Hot path optimization: Fee parameters and counters in instance storage
+// - Avoid redundant reads: packed structs for compound operations
+// - TTL-aware: Processing remittances extended during state changes
+// - Idempotent writes: Skip if value unchanged to save ledger entries
+// ============================================================================
+
 use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 use crate::{AgentStats, ContractError, DailyLimit, Remittance, SenderVolumeEntry, TransferRecord};
@@ -175,6 +215,9 @@ enum DataKey {
     DisputeWindow,
     // === Partial Payout ===
     DisbursedAmount(u64),
+    PartialPayoutHistory(u64),
+    // === Remittance Expiry Window ===
+    RemittanceExpiryWindow,
     // === Idempotency ===
     IdempotencyRecord(soroban_sdk::String),
     IdempotencyTTL,
@@ -205,10 +248,23 @@ enum DataKey {
     ActiveFeeProposal,
     // === Sender Remittances ===
     SenderRemittances(soroban_sdk::Address),
+    // === Agent Remittances ===
+    AgentRemittances(soroban_sdk::Address),
     // === Rate Limit ===
     RateLimitConfig,
     RateLimitWindow(soroban_sdk::Address),
+    // === Abuse Protection ===
+    AbuseCooldownDecayRateBps,
 
+    // === Corridor Volume Limits (#839) ===
+    /// Daily volume cap for a corridor indexed by (from_country, to_country)
+    CorridorCap(soroban_sdk::String, soroban_sdk::String),
+    /// Rolling daily volume for a corridor: (from_country, to_country) -> (window_start, volume)
+    CorridorVolume(soroban_sdk::String, soroban_sdk::String),
+
+    // === Admin Key Rotation (#842) ===
+    /// Nominated new admin address and the expiry timestamp of the nomination
+    NominatedAdmin,
 }
 
 /// Checks if the contract has an admin configured.
@@ -786,14 +842,6 @@ pub fn set_user_transfers(env: &Env, user: &Address, transfers: &Vec<TransferRec
     env.storage()
         .persistent()
         .set(&DataKey::UserTransfers(user.clone()), transfers);
-}
-
-/// A bucketed volume entry for rolling sender discount calculations.
-#[soroban_sdk::contracttype]
-#[derive(Clone)]
-pub struct SenderVolumeEntry {
-    pub bucket_start: u64,
-    pub amount: i128,
 }
 
 pub fn get_sender_volume_history(env: &Env, sender: &Address) -> Vec<SenderVolumeEntry> {
@@ -1461,6 +1509,13 @@ pub fn remove_idempotency_record(env: &Env, key: &String) {
         .remove(&DataKey::IdempotencyRecord(key.clone()));
 }
 
+/// Gets an idempotency record without TTL filtering (used for cleanup).
+pub fn get_idempotency_record_raw(env: &Env, key: &String) -> Option<crate::IdempotencyRecord> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::IdempotencyRecord(key.clone()))
+}
+
 /// Gets the runtime max expired batch size (falls back to compile-time constant).
 pub fn get_max_expired_batch_size(env: &Env) -> u32 {
     env.storage()
@@ -1612,6 +1667,50 @@ pub fn add_disbursed_amount(env: &Env, remittance_id: u64, amount: i128) -> Resu
     Ok(())
 }
 
+/// Appends a partial payout record to the remittance's disbursement history.
+pub fn append_partial_payout_record(
+    env: &Env,
+    remittance_id: u64,
+    record: crate::PartialPayoutRecord,
+) {
+    let mut history: Vec<crate::PartialPayoutRecord> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::PartialPayoutHistory(remittance_id))
+        .unwrap_or_else(|| Vec::new(env));
+    history.push_back(record);
+    env.storage()
+        .persistent()
+        .set(&DataKey::PartialPayoutHistory(remittance_id), &history);
+}
+
+/// Returns the full list of partial payout records for a remittance.
+pub fn get_partial_payout_history(
+    env: &Env,
+    remittance_id: u64,
+) -> Vec<crate::PartialPayoutRecord> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::PartialPayoutHistory(remittance_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Returns the global remittance auto-expiry window in seconds (0 = disabled).
+pub fn get_remittance_expiry_window(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::RemittanceExpiryWindow)
+        .unwrap_or(0)
+}
+
+/// Sets the global remittance auto-expiry window in seconds.
+/// A value of 0 disables auto-expiry for newly created remittances.
+pub fn set_remittance_expiry_window(env: &Env, seconds: u64) {
+    env.storage()
+        .instance()
+        .set(&DataKey::RemittanceExpiryWindow, &seconds);
+}
+
 // === Per-Agent Daily Withdrawal Cap ===
 
 /// Rolling 24-hour window in seconds. Derives from the shared daily-limit constant
@@ -1721,6 +1820,18 @@ pub fn append_sender_remittance(env: &Env, sender: &Address, remittance_id: u64)
     env.storage().persistent().set(&key, &ids);
 }
 
+/// Appends a remittance ID to the agent's persistent remittance index.
+pub fn append_agent_remittance(env: &Env, agent: &Address, remittance_id: u64) {
+    let key = DataKey::AgentRemittances(agent.clone());
+    let mut ids: soroban_sdk::Vec<u64> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+    ids.push_back(remittance_id);
+    env.storage().persistent().set(&key, &ids);
+}
+
 /// Returns all remittance IDs for a sender.
 ///
 /// The caller is responsible for applying pagination (offset/limit) to avoid
@@ -1729,6 +1840,14 @@ pub fn get_sender_remittances(env: &Env, sender: &Address) -> soroban_sdk::Vec<u
     env.storage()
         .persistent()
         .get(&DataKey::SenderRemittances(sender.clone()))
+        .unwrap_or_else(|| soroban_sdk::Vec::new(env))
+}
+
+/// Returns all remittance IDs for an agent.
+pub fn get_agent_remittances(env: &Env, agent: &Address) -> soroban_sdk::Vec<u64> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::AgentRemittances(agent.clone()))
         .unwrap_or_else(|| soroban_sdk::Vec::new(env))
 }
 
@@ -2024,4 +2143,134 @@ pub fn extend_remittance_ttl(env: &Env, remittance_id: u64, ledgers: u32) {
     if env.storage().persistent().has(&key) {
         env.storage().persistent().extend_ttl(&key, ledgers, ledgers);
     }
+}
+
+// ── Corridor Volume Limits (#839) ────────────────────────────────────────────
+
+/// Window for corridor rolling volume resets (same as daily limit window).
+pub const CORRIDOR_VOLUME_WINDOW_SECONDS: u64 = crate::config::DAILY_LIMIT_WINDOW_SECONDS;
+
+/// Packed record stored per corridor: tracks the rolling window start and accumulated volume.
+#[soroban_sdk::contracttype]
+#[derive(Clone)]
+pub struct CorridorVolumeRecord {
+    pub window_start: u64,
+    pub volume: i128,
+}
+
+/// Returns the current corridor daily cap (0 = no cap configured).
+pub fn get_corridor_cap(env: &Env, from_country: &String, to_country: &String) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::CorridorCap(from_country.clone(), to_country.clone()))
+        .unwrap_or(0)
+}
+
+/// Sets the daily volume cap for a corridor (admin only, enforced at call site).
+pub fn set_corridor_cap(env: &Env, from_country: &String, to_country: &String, cap: i128) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::CorridorCap(from_country.clone(), to_country.clone()), &cap);
+}
+
+/// Checks that adding `amount` to the corridor's rolling volume does not exceed
+/// the cap, then records the amount. Returns `DailySendLimitExceeded` if the cap
+/// would be breached; returns `Ok(())` when no cap is configured.
+pub fn check_and_increment_corridor_volume(
+    env: &Env,
+    from_country: &String,
+    to_country: &String,
+    amount: i128,
+) -> Result<(), ContractError> {
+    let cap = get_corridor_cap(env, from_country, to_country);
+    if cap == 0 {
+        return Ok(()); // No cap configured for this corridor
+    }
+
+    let now = env.ledger().timestamp();
+    let key = DataKey::CorridorVolume(from_country.clone(), to_country.clone());
+
+    let record: CorridorVolumeRecord = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(CorridorVolumeRecord { window_start: now, volume: 0 });
+
+    // If the record belongs to a previous window, reset it
+    let (window_start, current_volume) =
+        if now.saturating_sub(record.window_start) >= CORRIDOR_VOLUME_WINDOW_SECONDS {
+            (now, 0i128)
+        } else {
+            (record.window_start, record.volume)
+        };
+
+    let new_volume = current_volume
+        .checked_add(amount)
+        .ok_or(ContractError::Overflow)?;
+
+    if new_volume > cap {
+        return Err(ContractError::CorridorVolumeLimitExceeded);
+    }
+
+    env.storage()
+        .persistent()
+        .set(&key, &CorridorVolumeRecord { window_start, volume: new_volume });
+
+    Ok(())
+}
+
+// ── Admin Key Rotation (#842) ─────────────────────────────────────────────────
+
+/// 48-hour nomination expiry in seconds.
+pub const ADMIN_NOMINATION_EXPIRY_SECONDS: u64 = 48 * 3600;
+
+/// Packed record for an admin nomination: proposed address + expiry timestamp.
+#[soroban_sdk::contracttype]
+#[derive(Clone)]
+pub struct AdminNomination {
+    pub nominee: Address,
+    pub expires_at: u64,
+    pub nominator: Address,
+}
+
+/// Returns the current admin nomination, if any.
+pub fn get_admin_nomination(env: &Env) -> Option<AdminNomination> {
+    env.storage()
+        .instance()
+        .get(&DataKey::NominatedAdmin)
+}
+
+/// Stores an admin nomination.
+pub fn set_admin_nomination(env: &Env, nomination: &AdminNomination) {
+    env.storage()
+        .instance()
+        .set(&DataKey::NominatedAdmin, nomination);
+}
+
+/// Clears the admin nomination.
+pub fn clear_admin_nomination(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&DataKey::NominatedAdmin);
+}
+
+// === Abuse Cooldown Decay Rate ===
+
+/// Returns the configured abuse cooldown decay rate in basis points.
+///
+/// The decay rate controls how quickly cooldown periods shrink after violations.
+/// A rate of 5000 bps (50%) halves the cooldown each decay step (every 24h).
+/// Returns 5000 (50%) by default if not explicitly configured.
+pub fn get_abuse_cooldown_decay_rate_bps(env: &Env) -> u128 {
+    env.storage()
+        .instance()
+        .get::<DataKey, u32>(&DataKey::AbuseCooldownDecayRateBps)
+        .unwrap_or(5_000) as u128
+}
+
+/// Sets the abuse cooldown decay rate in basis points (0–10000).
+pub fn set_abuse_cooldown_decay_rate_bps(env: &Env, rate_bps: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::AbuseCooldownDecayRateBps, &rate_bps);
 }

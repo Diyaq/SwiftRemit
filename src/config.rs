@@ -195,6 +195,27 @@ pub const SETTLEMENT_EVENT_EMITTED_FLAG: u32 = 1 << 1;
 /// breaking changes to migration data structures.
 pub const MIGRATION_SNAPSHOT_VERSION: u32 = 1;
 
+// ============================================================================
+// Idempotency TTL (#841)
+// ============================================================================
+
+/// Default TTL for idempotency records: 7 days in seconds.
+///
+/// Records older than this can be removed by `cleanup_expired_idempotency_keys`.
+/// The value matches the typical settlement window so that stale deduplication
+/// keys do not accumulate in persistent storage indefinitely.
+pub const IDEMPOTENCY_TTL_SECONDS: u64 = 7 * 24 * 60 * 60; // 604_800 seconds
+
+// ============================================================================
+// Circuit Breaker Cooldown
+// ============================================================================
+
+/// Default post-unpause cooldown period in seconds (1 hour).
+///
+/// During this window after an emergency unpause, per-sender rate limits are
+/// halved to throttle traffic and prevent immediate exploitation.
+pub const DEFAULT_COOLDOWN_PERIOD_SECONDS: u64 = 3_600;
+
 #[cfg(test)]
 mod tests {
     use super::*;
