@@ -16,8 +16,8 @@ const server = new SorobanRpc.Server(rpcUrl);
 export async function getBaseFee(): Promise<string> {
   const envFee = process.env.STELLAR_BASE_FEE;
   if (envFee) return envFee;
-  const baseFee = await server.fetchBaseFee();
-  return String(baseFee);
+  const feeStats = await server.getFeeStats();
+  return feeStats.inclusionFee.mode;
 }
 
 export async function storeVerificationOnChain(

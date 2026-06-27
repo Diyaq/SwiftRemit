@@ -1,6 +1,15 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './AnchorSelector.css';
 
+function useDebounce<T>(value: T, delay = 300): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(id);
+  }, [value, delay]);
+  return debounced;
+}
+
 export interface AnchorProvider {
   id: string;
   name: string;
@@ -61,6 +70,11 @@ export const AnchorSelector: React.FC<AnchorSelectorProps> = ({
   const [selectedAnchor, setSelectedAnchor] = useState<AnchorProvider | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState<number>(-1);
+  const [searchQuery, setSearchQuery] = useState('');
+  const debouncedSearch = useDebounce(searchQuery, 300);
+  const filteredAnchors = debouncedSearch
+    ? anchors.filter(a => a.name.toLowerCase().includes(debouncedSearch.toLowerCase()) || a.domain.toLowerCase().includes(debouncedSearch.toLowerCase()))
+    : anchors;
   
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -118,7 +132,7 @@ export const AnchorSelector: React.FC<AnchorSelectorProps> = ({
       setIsOpen(true);
       // Set focus to selected item or first item when opening
       const selectedIndex = selectedAnchor 
-        ? anchors.findIndex(a => a.id === selectedAnchor.id)
+        ? filteredAnchors.findIndex(a => a.id === selectedAnchor.id)
         : 0;
       setFocusedIndex(selectedIndex >= 0 ? selectedIndex : 0);
     } else {
@@ -134,7 +148,7 @@ export const AnchorSelector: React.FC<AnchorSelectorProps> = ({
         e.preventDefault();
         setIsOpen(true);
         const selectedIndex = selectedAnchor 
-          ? anchors.findIndex(a => a.id === selectedAnchor.id)
+          ? filteredAnchors.findIndex(a => a.id === selectedAnchor.id)
           : 0;
         setFocusedIndex(selectedIndex >= 0 ? selectedIndex : 0);
       }
@@ -145,7 +159,7 @@ export const AnchorSelector: React.FC<AnchorSelectorProps> = ({
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
-        setFocusedIndex(prev => (prev < anchors.length - 1 ? prev + 1 : prev));
+        setFocusedIndex(prev => (prev < filteredAnchors.length - 1 ? prev + 1 : prev));
         break;
       case 'ArrowUp':
         e.preventDefault();
@@ -157,13 +171,13 @@ export const AnchorSelector: React.FC<AnchorSelectorProps> = ({
         break;
       case 'End':
         e.preventDefault();
-        setFocusedIndex(anchors.length - 1);
+        setFocusedIndex(filteredAnchors.length - 1);
         break;
       case 'Enter':
       case ' ':
         e.preventDefault();
-        if (focusedIndex >= 0 && focusedIndex < anchors.length) {
-          handleSelect(anchors[focusedIndex]);
+        if (focusedIndex >= 0 && focusedIndex < filteredAnchors.length) {
+          handleSelect(filteredAnchors[focusedIndex]);
         }
         break;
       case 'Escape':
@@ -175,15 +189,15 @@ export const AnchorSelector: React.FC<AnchorSelectorProps> = ({
       case 'Tab':
         // Trap focus: cycle through options instead of leaving the dropdown
         e.preventDefault();
-        if (anchors.length === 0) break;
+        if (filteredAnchors.length === 0) break;
         if (e.shiftKey) {
-          setFocusedIndex(prev => (prev > 0 ? prev - 1 : anchors.length - 1));
+          setFocusedIndex(prev => (prev > 0 ? prev - 1 : filteredAnchors.length - 1));
         } else {
-          setFocusedIndex(prev => (prev < anchors.length - 1 ? prev + 1 : 0));
+          setFocusedIndex(prev => (prev < filteredAnchors.length - 1 ? prev + 1 : 0));
         }
         break;
     }
-  }, [isOpen, focusedIndex, anchors, selectedAnchor]);
+  }, [isOpen, focusedIndex, filteredAnchors, selectedAnchor]);
 
   // Scroll focused option into view
   useEffect(() => {
@@ -269,7 +283,16 @@ export const AnchorSelector: React.FC<AnchorSelectorProps> = ({
             aria-labelledby={`${listboxId}-label`}
             tabIndex={-1}
           >
-            {anchors.map((anchor, index) => (
+            <input
+              type="search"
+              className="anchor-search-input"
+              placeholder="Search anchors..."
+              value={searchQuery}
+              onChange={(e) => { setSearchQuery(e.target.value); setFocusedIndex(0); }}
+              aria-label="Search anchor providers"
+              autoFocus
+            />
+            {filteredAnchors.map((anchor, index) => (
               <div 
                 key={anchor.id} 
                 className={`anchor-option ${selectedAnchor?.id === anchor.id ? 'selected' : ''} ${focusedIndex === index ? 'focused' : ''}`}
