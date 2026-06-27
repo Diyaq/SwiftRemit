@@ -96,3 +96,9 @@ frontend/coverage/
 # Soroban CLI identity files (contain private keys)
 .soroban-identity/
 identity/
+
+# k6 load test results
+tests/load/results/*.html
+tests/load/results/*.json
+tests/load/results/*.txt
+
