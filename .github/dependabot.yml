@@ -34,3 +34,38 @@ updates:
       interval: weekly
     labels:
       - dependencies
+
+  # Keep GitHub Actions versions up to date (also keeps Trivy action current
+  # so vulnerability database stays fresh)
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - github-actions
+
+  # Docker base image updates
+  - package-ecosystem: docker
+    directory: "/backend"
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - docker
+
+  - package-ecosystem: docker
+    directory: "/api"
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - docker
+
+  - package-ecosystem: docker
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - docker
