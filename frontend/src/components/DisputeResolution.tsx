@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
@@ -68,6 +69,7 @@ function parseAuditLogResponse(value: unknown): AuditLogItem[] {
 const PAGE_SIZE = 10;
 
 export default function DisputeResolution() {
+  const { t } = useTranslation();
   const [disputes, setDisputes] = useState<DisputeItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -153,15 +155,15 @@ export default function DisputeResolution() {
   }
 
   return (
-    <div className="panel" role="main" aria-label="Dispute Resolution">
-      <h2>Dispute Resolution</h2>
+    <div className="panel" role="main" aria-label={t('dispute.title')}>
+      <h2>{t('dispute.title')}</h2>
 
       {error && <div className="error" role="alert">{error}</div>}
 
       {resolvedTxHash && (
         <div role="status" style={{ background: '#f0fff4', border: '1px solid #9ae6b4', borderRadius: '8px', padding: '12px 16px', marginBottom: '16px', fontSize: '0.85rem' }}>
-          ✅ Dispute resolved on-chain.{' '}
-          <strong>Tx:</strong>{' '}
+          ✅ {t('dispute.resolved')}{' '}
+          <strong>{t('dispute.tx')}</strong>{' '}
           <a
             href={`https://stellar.expert/explorer/public/tx/${resolvedTxHash}`}
             target="_blank"
@@ -184,28 +186,26 @@ export default function DisputeResolution() {
           }}
         >
           <div style={{ background: '#fff', borderRadius: '12px', padding: '24px', maxWidth: '400px', width: '90%' }}>
-            <h3 id="confirm-title">Confirm Resolution</h3>
+            <h3 id="confirm-title">{t('dispute.confirmTitle')}</h3>
             <p style={{ margin: '12px 0' }}>
-              Resolve dispute <strong>#{confirmOpen.id}</strong> in favour of{' '}
-              <strong>{confirmOpen.inFavourOfSender ? 'Sender' : 'Agent'}</strong>?
-              {confirmOpen.inFavourOfSender
-                ? ' Funds will be returned to the sender.'
-                : ' Funds will be released to the agent minus fees.'}
+              {t('dispute.confirmMessage', { id: confirmOpen.id, party: confirmOpen.inFavourOfSender ? t('dispute.sender') : t('dispute.agent') })}
+              {' '}
+              {confirmOpen.inFavourOfSender ? t('dispute.senderFunds') : t('dispute.agentFunds')}
             </p>
             <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-              <button onClick={() => setConfirmOpen(null)}>Cancel</button>
-              <button className="btn-primary" onClick={confirmResolve}>Confirm</button>
+              <button onClick={() => setConfirmOpen(null)}>{t('dispute.cancel')}</button>
+              <button className="btn-primary" onClick={confirmResolve}>{t('dispute.confirm')}</button>
             </div>
           </div>
         </div>
       )}
 
-      <section aria-label="Open disputes">
-        <h3>Open Disputes</h3>
+      <section aria-label={t('dispute.openDisputes')}>
+        <h3>{t('dispute.openDisputes')}</h3>
         {loading ? (
-          <p aria-live="polite">Loading…</p>
+          <p aria-live="polite">{t('dispute.loading')}</p>
         ) : disputes.length === 0 ? (
-          <p>No disputed remittances.</p>
+          <p>{t('dispute.noDisputes')}</p>
         ) : (
           <ul style={{ listStyle: 'none', padding: 0 }}>
             {disputes.map((d) => (
@@ -216,16 +216,16 @@ export default function DisputeResolution() {
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
                   <div>
-                    <strong>Remittance #{d.id}</strong>
+                    <strong>{t('dispute.remittance', { id: d.id })}</strong>
                     <div style={{ fontSize: '0.8rem', color: '#666', marginTop: '4px' }}>
-                      <span>Sender: {d.sender}</span> · <span>Agent: {d.agent}</span>
+                      <span>{t('dispute.sender')} {d.sender}</span> · <span>{t('dispute.agent')} {d.agent}</span>
                     </div>
                     <div style={{ fontSize: '0.8rem', color: '#666' }}>
-                      Amount: {d.amount} USDC · Created: {d.created_at ? new Date(d.created_at).toLocaleString() : '—'}
+                      {t('dispute.amount')} {d.amount} USDC · {t('dispute.created')} {d.created_at ? new Date(d.created_at).toLocaleString() : '—'}
                     </div>
                     {d.evidence_hash && (
                       <div style={{ fontSize: '0.8rem', marginTop: '4px' }}>
-                        Evidence hash: <code style={{ wordBreak: 'break-all' }}>{d.evidence_hash}</code>
+                        {t('dispute.evidenceHash')} <code style={{ wordBreak: 'break-all' }}>{d.evidence_hash}</code>
                       </div>
                     )}
                   </div>
@@ -236,7 +236,7 @@ export default function DisputeResolution() {
                       aria-label={`Resolve #${d.id} in favour of sender`}
                       style={{ background: '#3182ce', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer' }}
                     >
-                      Favour Sender
+                      {t('dispute.favourSender')}
                     </button>
                     <button
                       onClick={() => openConfirm(d.id, false)}
@@ -244,38 +244,38 @@ export default function DisputeResolution() {
                       aria-label={`Resolve #${d.id} in favour of agent`}
                       style={{ background: '#38a169', color: '#fff', border: 'none', borderRadius: '6px', padding: '6px 12px', cursor: 'pointer' }}
                     >
-                      Favour Agent
+                      {t('dispute.favourAgent')}
                     </button>
                   </div>
                 </div>
-                {resolving === d.id && <p aria-live="polite" style={{ marginTop: '8px', fontSize: '0.85rem' }}>Resolving…</p>}
+                {resolving === d.id && <p aria-live="polite" style={{ marginTop: '8px', fontSize: '0.85rem' }}>{t('dispute.resolving')}</p>}
               </li>
             ))}
           </ul>
         )}
         {!loading && (disputes.length > 0 || page > 1) && (
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '12px' }}>
-            <button onClick={() => void fetchDisputes(page - 1)} disabled={page <= 1} aria-label="Previous page">← Prev</button>
-            <span>Page {page}</span>
-            <button onClick={() => void fetchDisputes(page + 1)} disabled={!hasMore} aria-label="Next page">Next →</button>
+            <button onClick={() => void fetchDisputes(page - 1)} disabled={page <= 1} aria-label="Previous page">{t('dispute.prevPage')}</button>
+            <span>{t('dispute.page', { page })}</span>
+            <button onClick={() => void fetchDisputes(page + 1)} disabled={!hasMore} aria-label="Next page">{t('dispute.nextPage')}</button>
           </div>
         )}
       </section>
 
       <hr style={{ margin: '24px 0' }} />
 
-      <section aria-label="Dispute audit trail">
-        <h3>Audit Trail</h3>
+      <section aria-label={t('dispute.auditTrail')}>
+        <h3>{t('dispute.auditTrail')}</h3>
         {auditLog.length === 0 ? (
-          <p style={{ fontSize: '0.85rem', color: '#666' }}>No resolved disputes yet.</p>
+          <p style={{ fontSize: '0.85rem', color: '#666' }}>{t('dispute.noResolved')}</p>
         ) : (
           <table style={{ width: '100%', fontSize: '0.8rem', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ borderBottom: '2px solid #e2e8f0' }}>
                 <th style={{ textAlign: 'left', padding: '6px' }}>ID</th>
-                <th style={{ textAlign: 'left', padding: '6px' }}>Resolved At</th>
-                <th style={{ textAlign: 'left', padding: '6px' }}>In Favour Of</th>
-                <th style={{ textAlign: 'left', padding: '6px' }}>Resolved By</th>
+                <th style={{ textAlign: 'left', padding: '6px' }}>{t('dispute.resolvedAt')}</th>
+                <th style={{ textAlign: 'left', padding: '6px' }}>{t('dispute.inFavourOf')}</th>
+                <th style={{ textAlign: 'left', padding: '6px' }}>{t('dispute.resolvedBy')}</th>
               </tr>
             </thead>
             <tbody>
@@ -286,7 +286,7 @@ export default function DisputeResolution() {
                 >
                   <td style={{ padding: '6px' }}>#{entry.remittance_id}</td>
                   <td style={{ padding: '6px' }}>{entry.resolved_at ? new Date(entry.resolved_at).toLocaleString() : '—'}</td>
-                  <td style={{ padding: '6px' }}>{entry.in_favour_of_sender ? 'Sender' : 'Agent'}</td>
+                  <td style={{ padding: '6px' }}>{entry.in_favour_of_sender ? t('dispute.sender') : t('dispute.agent')}</td>
                   <td style={{ padding: '6px' }}>{entry.resolved_by || '—'}</td>
                 </tr>
               ))}

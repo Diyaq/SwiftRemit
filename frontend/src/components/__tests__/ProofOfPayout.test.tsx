@@ -179,7 +179,6 @@ describe('ProofOfPayout', () => {
         remittanceId: '42',
         transactionHash: 'abc123',
         amount: '100',
-        recipient: 'GXXXXXX',
         fee: '1',
         asset: 'USDC',
         sender: 'GSENDER',

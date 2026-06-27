@@ -97,7 +97,7 @@ export class SwiftRemitClient {
     method: string,
     args: xdr.ScVal[]
   ): Promise<Transaction> {
-    const account = await this.server.getAccount(sourceAddress);
+    const account = await this.withTimeout(this.server.getAccount(sourceAddress));
     const tx = new TransactionBuilder(account, {
       fee: this.fee,
       networkPassphrase: this.networkPassphrase,
@@ -106,7 +106,7 @@ export class SwiftRemitClient {
       .setTimeout(30)
       .build();
 
-    const simResult = await this.server.simulateTransaction(tx);
+    const simResult = await this.withTimeout(this.server.simulateTransaction(tx));
     if (SorobanRpc.Api.isSimulationError(simResult)) {
       const typed = parseContractError(simResult.error);
       if (typed) throw typed;
@@ -131,10 +131,20 @@ export class SwiftRemitClient {
       throw new Error(`Submit failed: ${JSON.stringify(sendResult.errorResult)}`);
     }
 
-    let getResult = await this.server.getTransaction(sendResult.hash);
+    let getResult = await withRetry(
+      () => this.server.getTransaction(sendResult.hash),
+      this.retries,
+      this.retryDelayMs,
+      this.retryBackoffFactor
+    );
     while (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
       await new Promise((r) => setTimeout(r, 1000));
-      getResult = await this.server.getTransaction(sendResult.hash);
+      getResult = await withRetry(
+        () => this.server.getTransaction(sendResult.hash),
+        this.retries,
+        this.retryDelayMs,
+        this.retryBackoffFactor
+      );
     }
 
     if (getResult.status !== SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
@@ -153,7 +163,7 @@ export class SwiftRemitClient {
     method: string,
     args: xdr.ScVal[]
   ): Promise<xdr.ScVal> {
-    const account = await this.server.getAccount(sourceAddress);
+    const account = await this.withTimeout(this.server.getAccount(sourceAddress));
     const tx = new TransactionBuilder(account, {
       fee: this.fee,
       networkPassphrase: this.networkPassphrase,
