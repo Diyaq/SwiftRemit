@@ -35,10 +35,34 @@ export interface CorridorAnalyticsResponse {
   timestamp: string;
 }
 
+export interface TimeSeriesPoint {
+  timestamp: string;
+  volume: number;
+  transaction_count: number;
+  fees: number;
+}
+
+export interface TimeSeriesResponse {
+  success: true;
+  data: {
+    corridor: string;
+    interval: string;
+    range: string;
+    data: TimeSeriesPoint[];
+  };
+  timestamp: string;
+}
+
 const VALID_RANGES: Record<string, string> = {
   '7d': '7 days',
   '30d': '30 days',
   '90d': '90 days',
+};
+
+const VALID_INTERVALS: Record<string, { pg: string; label: string }> = {
+  '1h': { pg: '1 hour', label: '1h' },
+  '1d': { pg: '1 day', label: '1d' },
+  '1w': { pg: '1 week', label: '1w' },
 };
 
 function timestamp(): string {
@@ -150,6 +174,93 @@ export function createAnalyticsRouter(pool: Pool, adminApiKey?: string): Router 
       // eslint-disable-next-line no-console
       void err;
       return sendError(res, 500, 'Failed to fetch corridor analytics', 'ANALYTICS_ERROR');
+    }
+  });
+
+  /**
+   * GET /api/analytics/timeseries
+   * Time-series endpoint for charting volume per corridor
+   * Query params:
+   *   corridor {string}  - Corridor identifier (currency_country, e.g., USDC_UG)
+   *   interval {string}  - Bucket interval: 1h | 1d | 1w (default: 1d)
+   *   range    {string}  - Time range: 7d | 30d | 90d (default: 30d)
+   */
+  router.get('/timeseries', adminAuth, async (req: Request, res: Response) => {
+    const { corridor, interval: intervalParam, range: rangeParam } = req.query as Record<string, string | undefined>;
+
+    if (!corridor) {
+      return sendError(res, 400, 'corridor parameter is required', 'MISSING_CORRIDOR');
+    }
+
+    const interval = intervalParam || '1d';
+    const range = rangeParam || '30d';
+
+    if (!VALID_RANGES[range]) {
+      return sendError(res, 400, `range must be one of: ${Object.keys(VALID_RANGES).join(', ')}`, 'INVALID_RANGE');
+    }
+
+    if (!VALID_INTERVALS[interval]) {
+      return sendError(res, 400, `interval must be one of: ${Object.keys(VALID_INTERVALS).join(', ')}`, 'INVALID_INTERVAL');
+    }
+
+    try {
+      const [currency, country] = corridor.split('_');
+      if (!currency || !country) {
+        return sendError(res, 400, 'corridor must be formatted as CURRENCY_COUNTRY', 'INVALID_CORRIDOR_FORMAT');
+      }
+
+      const rangeInterval = VALID_RANGES[range];
+      const bucketInterval = VALID_INTERVALS[interval].pg;
+
+      const result = await pool.query<{
+        bucket: string;
+        volume: string;
+        count: string;
+        fees: string;
+      }>(
+        `SELECT
+           DATE_TRUNC('${bucketInterval}'::text, timestamp AT TIME ZONE 'UTC') AS bucket,
+           SUM(COALESCE(amount, 0)) AS volume,
+           COUNT(*) AS count,
+           SUM(COALESCE(fee, 0)) AS fees
+         FROM contract_events
+         WHERE timestamp >= NOW() - INTERVAL '${rangeInterval}'
+           AND (raw_data->>'source_currency' = $1 OR raw_data->>'currency' = $1)
+           AND (raw_data->>'destination_country' = $2 OR raw_data->>'country' = $2)
+           AND event_type IN ('remittance_created', 'remittance_completed')
+         GROUP BY bucket
+         ORDER BY bucket ASC`,
+        [currency, country],
+      );
+
+      const data: TimeSeriesPoint[] = result.rows.map((row: {
+        bucket: string;
+        volume: string;
+        count: string;
+        fees: string;
+      }) => ({
+        timestamp: new Date(row.bucket).toISOString(),
+        volume: parseFloat(row.volume) || 0,
+        transaction_count: parseInt(row.count, 10),
+        fees: parseFloat(row.fees) || 0,
+      }));
+
+      const response: TimeSeriesResponse = {
+        success: true,
+        data: {
+          corridor,
+          interval,
+          range,
+          data,
+        },
+        timestamp: timestamp(),
+      };
+
+      return res.json(response);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      void err;
+      return sendError(res, 500, 'Failed to fetch time-series data', 'TIMESERIES_ERROR');
     }
   });
 
