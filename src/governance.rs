@@ -103,6 +103,19 @@ pub fn do_propose(
             }
         }
         ProposalAction::UpdateTimelock(_) => {}
+        ProposalAction::UpdateCooldownPeriod(_) => {}
+        // #832: validate token is not already whitelisted
+        ProposalAction::WhitelistAsset(token) => {
+            if storage::is_token_whitelisted(env, token) {
+                return Err(ContractError::TokenAlreadyWhitelisted);
+            }
+        }
+        // #833: validate threshold is in valid range
+        ProposalAction::AdjustReputationThreshold(threshold) => {
+            if *threshold > 100 {
+                return Err(ContractError::InvalidReputationScore);
+            }
+        }
     }
 
     let id = next_proposal_id(env);
@@ -118,6 +131,7 @@ pub fn do_propose(
         expiry: now + ttl,
         approval_count: 0,
         approval_timestamp: None,
+        execute_after: None,
     };
     set_proposal(env, &proposal);
 
@@ -183,8 +197,10 @@ pub fn do_vote(
     let quorum = get_governance_quorum(env);
     if proposal.approval_count >= quorum {
         let now = env.ledger().timestamp();
+        let timelock = get_governance_timelock(env);
         proposal.state = ProposalState::Approved;
         proposal.approval_timestamp = Some(now);
+        proposal.execute_after = Some(now + timelock);
         emit_proposal_approved(env, proposal_id, now);
     }
 
@@ -206,11 +222,10 @@ pub fn do_execute(
         return Err(ContractError::InvalidProposalState);
     }
 
-    let timelock = get_governance_timelock(env);
-    let approved_at = proposal.approval_timestamp.unwrap_or(0);
     let now = env.ledger().timestamp();
-    if now < approved_at + timelock {
-        return Err(ContractError::TimelockNotElapsed);
+    let execute_after = proposal.execute_after.unwrap_or(0);
+    if now < execute_after {
+        return Err(ContractError::TimelockActive);
     }
 
     // Dispatch the action
@@ -399,6 +414,31 @@ fn dispatch_action(
         ProposalAction::UpdateTimelock(s) => {
             set_governance_timelock(env, *s);
         }
+        ProposalAction::UpdateCooldownPeriod(secs) => {
+            crate::circuit_breaker_storage::set_cooldown_period(env, *secs);
+        }
+        // #832: Whitelist a new token asset for multi-currency remittances.
+        ProposalAction::WhitelistAsset(token) => {
+            if storage::is_token_whitelisted(env, token) {
+                return Err(ContractError::TokenAlreadyWhitelisted);
+            }
+            storage::set_token_whitelisted(env, token, true);
+            env.events().publish(
+                (soroban_sdk::symbol_short!("gov"), soroban_sdk::symbol_short!("wl_asset")),
+                (token.clone(), proposal_id),
+            );
+        }
+        // #833: Adjust the minimum reputation threshold via DAO governance.
+        ProposalAction::AdjustReputationThreshold(threshold) => {
+            if *threshold > 100 {
+                return Err(ContractError::InvalidReputationScore);
+            }
+            storage::set_min_agent_reputation(env, *threshold);
+            env.events().publish(
+                (soroban_sdk::symbol_short!("gov"), soroban_sdk::symbol_short!("rep_thr")),
+                (*threshold, proposal_id),
+            );
+        }
     }
     Ok(())
 }
@@ -416,5 +456,8 @@ fn action_type_symbol(env: &Env, action: &ProposalAction) -> Symbol {
         ProposalAction::RemoveAdmin(_) => Symbol::new(env, "rem_admin"),
         ProposalAction::UpdateQuorum(_) => Symbol::new(env, "upd_quorum"),
         ProposalAction::UpdateTimelock(_) => Symbol::new(env, "upd_tlock"),
+        ProposalAction::UpdateCooldownPeriod(_) => Symbol::new(env, "upd_cool"),
+        ProposalAction::WhitelistAsset(_) => Symbol::new(env, "wl_asset"),
+        ProposalAction::AdjustReputationThreshold(_) => Symbol::new(env, "rep_thr"),
     }
 }
