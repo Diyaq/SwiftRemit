@@ -14,6 +14,8 @@ export type {
   HealthStatus,
   FeeBreakdown,
   BatchCreateEntry,
+  BatchCreateResult,
+  BatchCreateResponse,
   CreateRemittanceParams,
   SettlementConfig,
   EscrowStatus,
